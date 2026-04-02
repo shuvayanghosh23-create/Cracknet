@@ -1,0 +1,10 @@
+# Build artifacts
+/cracknet
+crates/target/
+
+# Go
+*.test
+
+# OS
+.DS_Store
+Thumbs.db

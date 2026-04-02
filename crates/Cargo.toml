@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "cracknet-core",
+    "cracknet-cli",
+]
+resolver = "2"
