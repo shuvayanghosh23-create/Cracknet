@@ -1,0 +1,5 @@
+threads = 8
+gpu = false
+default_wordlist = ""
+pot_file = "~/.cracknet/pot.db"
+config_dir = "~/.cracknet"

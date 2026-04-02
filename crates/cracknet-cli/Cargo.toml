@@ -1,0 +1,13 @@
+[package]
+name = "cracknet-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cracknet-cli"
+path = "src/main.rs"
+
+[dependencies]
+cracknet-core = { path = "../cracknet-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
