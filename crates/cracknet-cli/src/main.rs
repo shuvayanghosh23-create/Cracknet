@@ -1,20 +1,13 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
+use std::sync::mpsc;
 
 use cracknet_core::{
     analyze::detect_hash_type,
-    job::{execute_job, Job},
+    job::{execute_job_with_progress, Job},
+    progress::Progress,
 };
-
-/// Input message types from Go CLI (for documentation).
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum InputMessage {
-    Analyze { hash: String },
-    Crack(Job),
-}
 
 /// Output message types sent back to Go CLI.
 #[derive(Debug, Serialize)]
@@ -25,7 +18,6 @@ enum OutputMessage {
         confidence: f32,
         difficulty: String,
     },
-    #[allow(dead_code)]
     Progress {
         tried: u64,
         speed: f64,
@@ -102,7 +94,28 @@ fn main() {
                     }
                 };
 
-                match execute_job(job) {
+                // Set up a progress channel so attack progress is streamed to stdout
+                let (tx, rx) = mpsc::channel::<Progress>();
+                let stdout_clone = io::stdout();
+
+                // Spawn a thread to forward progress messages
+                let progress_thread = std::thread::spawn(move || {
+                    for p in rx {
+                        emit(&stdout_clone, &OutputMessage::Progress {
+                            tried: p.tried,
+                            speed: p.speed,
+                            elapsed_ms: p.elapsed_ms,
+                        });
+                    }
+                });
+
+                // Run the job with the progress sender
+                let result = execute_job_with_progress(job, Some(tx));
+
+                // Wait for progress thread to finish
+                let _ = progress_thread.join();
+
+                match result {
                     Ok(result) => {
                         emit(&stdout, &OutputMessage::Result {
                             cracked: result.cracked,
