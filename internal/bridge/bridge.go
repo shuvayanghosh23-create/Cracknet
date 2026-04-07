@@ -5,16 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 )
 
 // JobRequest is the message sent to the Rust binary.
 type JobRequest struct {
-	Type      string `json:"type"`
-	Hash      string `json:"hash"`
-	Wordlist  string `json:"wordlist,omitempty"`
-	Algorithm string `json:"algorithm,omitempty"`
-	Threads   int    `json:"threads,omitempty"`
+	Type      string  `json:"type"`
+	Hash      string  `json:"hash"`
+	Wordlist  *string `json:"wordlist,omitempty"`
+	Algorithm string  `json:"algorithm,omitempty"`
+	Threads   int     `json:"threads,omitempty"`
+	Mask      *string `json:"mask,omitempty"`
+	Mode      string  `json:"mode,omitempty"`
 }
 
 // Message is a generic JSON message received from the Rust binary.
@@ -48,9 +51,56 @@ func RunCrack(hash, wordlist, algorithm string, threads int, progress ProgressCa
 	req := JobRequest{
 		Type:      "crack",
 		Hash:      hash,
-		Wordlist:  wordlist,
+		Wordlist:  &wordlist,
 		Algorithm: algorithm,
 		Threads:   threads,
+		Mode:      "dictionary",
+	}
+	return call(req, progress)
+}
+
+// RunBruteforce asks the Rust binary to run a mask-based bruteforce attack.
+func RunBruteforce(hash, mask, algorithm string, threads int, progress ProgressCallback) (*Message, error) {
+	req := JobRequest{
+		Type:      "crack",
+		Hash:      hash,
+		Mask:      &mask,
+		Algorithm: algorithm,
+		Threads:   threads,
+		Mode:      "bruteforce",
+	}
+	return call(req, progress)
+}
+
+// RunHybrid asks the Rust binary to run a hybrid (wordlist + mask) attack.
+func RunHybrid(hash, wordlist, mask, algorithm string, threads int, progress ProgressCallback) (*Message, error) {
+	req := JobRequest{
+		Type:      "crack",
+		Hash:      hash,
+		Wordlist:  &wordlist,
+		Mask:      &mask,
+		Algorithm: algorithm,
+		Threads:   threads,
+		Mode:      "hybrid",
+	}
+	return call(req, progress)
+}
+
+// RunCrackAuto asks the Rust binary to pick the attack mode automatically.
+// wordlist and mask may be empty strings to indicate absence.
+func RunCrackAuto(hash, wordlist, mask, algorithm string, threads int, progress ProgressCallback) (*Message, error) {
+	req := JobRequest{
+		Type:      "crack",
+		Hash:      hash,
+		Algorithm: algorithm,
+		Threads:   threads,
+		Mode:      "auto",
+	}
+	if wordlist != "" {
+		req.Wordlist = &wordlist
+	}
+	if mask != "" {
+		req.Mask = &mask
 	}
 	return call(req, progress)
 }
@@ -133,11 +183,22 @@ func pipeInput(req JobRequest) (io.Reader, error) {
 }
 
 // findBinary locates the cracknet-cli binary.
+// It checks PATH first, then common development build locations.
 func findBinary() string {
 	// Check PATH first
 	if path, err := exec.LookPath("cracknet-cli"); err == nil {
 		return path
 	}
-	// Fall back to development build path
-	return "crates/target/release/cracknet-cli"
+	// Workspace root build (cargo build --release from repo root)
+	candidates := []string{
+		"target/release/cracknet-cli",
+		"crates/target/release/cracknet-cli",
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// Default to workspace build path
+	return "target/release/cracknet-cli"
 }

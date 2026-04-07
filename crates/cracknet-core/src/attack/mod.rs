@@ -1,4 +1,6 @@
+pub mod bruteforce;
 pub mod dictionary;
+pub mod hybrid;
 
 use serde::{Deserialize, Serialize};
 
