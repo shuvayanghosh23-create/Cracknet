@@ -84,6 +84,20 @@ func TestParseLine_UsernameCryptHash(t *testing.T) {
 	}
 }
 
+func TestParseLine_CryptHashColonAlgorithm(t *testing.T) {
+	hash := "$2b$12$WApznUOJfkEGSmYRfnkrPOr466oFDCaj4b6HY3EXGvfxm43seyhgK"
+	e := parseLine(hash + ":bcrypt")
+	if e == nil {
+		t.Fatal("expected entry, got nil")
+	}
+	if e.Hash != hash {
+		t.Errorf("wrong hash: %q", e.Hash)
+	}
+	if e.Algorithm != "bcrypt" {
+		t.Errorf("wrong algorithm: %q", e.Algorithm)
+	}
+}
+
 func TestParseFile_Dedup(t *testing.T) {
 	content := `# comment
 5f4dcc3b5aa765d61d8327deb882cf99
@@ -149,8 +163,8 @@ $2b$12$WApznUOJfkEGSmYRfnkrPOr466oFDCaj4b6HY3EXGvfxm43seyhgK
 
 func TestGroupByAlgorithm_TwoGroups(t *testing.T) {
 	entries := []HashEntry{
-		{Hash: "5f4dcc3b5aa765d61d8327deb882cf99"},              // MD5
-		{Hash: "da39a3ee5e6b4b0d3255bfef95601890afd80709"},       // SHA1
+		{Hash: "5f4dcc3b5aa765d61d8327deb882cf99"},                   // MD5
+		{Hash: "da39a3ee5e6b4b0d3255bfef95601890afd80709"},           // SHA1
 		{Hash: "aab3238922bcc25a6f606eb525ffdc56", Algorithm: "md5"}, // explicit MD5
 	}
 
