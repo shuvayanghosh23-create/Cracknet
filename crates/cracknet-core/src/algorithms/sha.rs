@@ -30,10 +30,7 @@ mod tests {
 
     #[test]
     fn test_sha1_password() {
-        assert_eq!(
-            sha1("password"),
-            "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8"
-        );
+        assert_eq!(sha1("password"), "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8");
     }
 
     #[test]

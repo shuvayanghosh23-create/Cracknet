@@ -207,15 +207,15 @@ fn emit_batch_progress(
     if let Some(sender) = tx {
         let elapsed = start.elapsed().as_millis() as u64;
         let tried = total_tried.load(Ordering::Relaxed);
-        let elapsed_nonzero = if elapsed == 0 { 1 } else { elapsed };
-        let speed = tried as f64 / (elapsed_nonzero as f64 / 1000.0);
+        let elapsed_safe = if elapsed == 0 { 1 } else { elapsed };
+        let speed = tried as f64 / (elapsed_safe as f64 / 1000.0);
         let _ = sender.send(BatchProgress {
             processed_hashes: processed_hashes.load(Ordering::Relaxed),
             total_hashes,
             cracked_hashes: cracked_hashes.load(Ordering::Relaxed),
             tried,
             speed,
-            elapsed_ms: elapsed_nonzero,
+            elapsed_ms: elapsed_safe,
             current_hash,
         });
     }

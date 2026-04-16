@@ -357,9 +357,6 @@ func runBatchCrack(
 		workers := threadsFlag
 		if algo == "bcrypt" {
 			workers = minInt(len(group), minInt(threadsFlag, runtime.NumCPU()))
-			if workers < 1 && len(group) > 0 {
-				workers = 1
-			}
 		}
 		fmt.Printf("\n  Batch session: algo=%s | total=%d | mode=%s | wordlist=%s | threads=%d | workers=%d\n",
 			algo, len(group), effectiveMode, formatWordlistSize(wordlistSize), threadsFlag, workers)
@@ -491,9 +488,6 @@ func progressBar(done, total, width int) string {
 		done = total
 	}
 	filled := int(float64(done) / float64(total) * float64(width))
-	if filled > width {
-		filled = width
-	}
 	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", width-filled) + "]"
 }
 
