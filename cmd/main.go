@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -318,13 +319,20 @@ func runBatchCrack(
 
 	for algo, group := range groups {
 		fmt.Printf("\n  [%s] %d hash(es)\n", algo, len(group))
+		groupStart := time.Now()
+		groupCracked := 0
+		groupLineActive := false
 
-		for _, entry := range group {
+		for idx, entry := range group {
 			h := entry.Hash
 
 			// Check pot file cache first
 			if potDB != nil {
 				if cached, err := potDB.LookupHash(h); err == nil && cached != nil {
+					if groupLineActive {
+						fmt.Println()
+						groupLineActive = false
+					}
 					display.PrintResult(display.Result{
 						Hash:      h,
 						Plaintext: cached.Plaintext,
@@ -333,40 +341,61 @@ func runBatchCrack(
 					})
 					fmt.Println("  (from cache)")
 					crackedCount++
+					groupCracked++
 					continue
 				}
 			}
 
 			progressFn := func(tried uint64, speed float64, elapsedMs uint64) {
-				display.PrintProgress(display.Progress{
-					Tried:     tried,
-					Speed:     speed,
-					ElapsedMs: elapsedMs,
-				})
+				elapsed := (time.Duration(elapsedMs) * time.Millisecond).Round(time.Second)
+				fmt.Printf("\r  [%s] %d/%d processed | current tried: %d | %.2f H/s | elapsed: %s   ",
+					algo, idx+1, len(group), tried, speed, elapsed)
+				groupLineActive = true
 			}
 
 			msg, err := callCrack(h, wordlistFlag, maskFlag, algo, effectiveMode, threadsFlag, progressFn)
 			if err != nil {
+				if groupLineActive {
+					fmt.Println()
+					groupLineActive = false
+				}
 				display.PrintError(fmt.Sprintf("%s: %v", h, err))
 				continue
 			}
 
-			result := display.Result{
-				Hash:      h,
-				Algorithm: algo,
-				ElapsedMs: msg.ElapsedMs,
-				Cracked:   msg.Cracked,
-			}
-			if msg.Plaintext != nil {
-				result.Plaintext = *msg.Plaintext
-			}
-			display.PrintResult(result)
-
 			if msg.Cracked && msg.Plaintext != nil && potDB != nil {
 				_ = potDB.SaveHash(h, *msg.Plaintext, algo)
+			}
+
+			if msg.Cracked {
+				if groupLineActive {
+					fmt.Println()
+					groupLineActive = false
+				}
+				result := display.Result{
+					Hash:      h,
+					Algorithm: algo,
+					ElapsedMs: msg.ElapsedMs,
+					Cracked:   true,
+				}
+				if msg.Plaintext != nil {
+					result.Plaintext = *msg.Plaintext
+				}
+				display.PrintResult(result)
 				crackedCount++
+				groupCracked++
 			}
 		}
+
+		if groupLineActive {
+			fmt.Println()
+		}
+		fmt.Printf("  [%s] summary: %d/%d cracked in %s\n",
+			algo,
+			groupCracked,
+			len(group),
+			time.Since(groupStart).Round(time.Millisecond),
+		)
 	}
 
 	fmt.Printf("\n  Batch complete: %d/%d cracked.\n", crackedCount, total)

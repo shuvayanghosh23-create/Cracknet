@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::algorithms::{md5, ntlm, sha};
+use crate::algorithms::{bcrypt, md5, ntlm, sha};
 use crate::attack::bruteforce::{generate_candidates, parse_mask};
 use crate::progress::Progress;
 
@@ -23,15 +23,19 @@ pub struct HybridJob {
     pub threads: usize,
 }
 
-fn hash_candidate(algo: &str, word: &str) -> String {
-    match algo {
+fn candidate_matches(algo: &str, word: &str, target: &str) -> bool {
+    if algo == "bcrypt" {
+        return bcrypt::verify(word, target);
+    }
+    let hash = match algo {
         "md5" | "md5_or_ntlm" => md5::hash(word),
         "sha1" => sha::sha1(word),
         "sha256" => sha::sha256(word),
         "sha512" => sha::sha512(word),
         "ntlm" => ntlm::hash(word),
         _ => md5::hash(word),
-    }
+    };
+    hash == target
 }
 
 /// Run a hybrid attack: for each word in the wordlist, expand `mask` and
@@ -52,12 +56,17 @@ pub fn run_hybrid_attack(
 
     let mask_segments = parse_mask(&job.mask)?;
 
-    let target = job.hash.to_lowercase();
+    let algo = job.algorithm.to_lowercase();
+    let target = if algo == "bcrypt" {
+        job.hash.clone()
+    } else {
+        job.hash.to_lowercase()
+    };
     let found = Arc::new(Mutex::new(None::<String>));
     let stop = Arc::new(AtomicBool::new(false));
     let tried = Arc::new(AtomicU64::new(0));
+    let last_progress_emit_ms = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
-    let algo = job.algorithm.to_lowercase();
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(job.threads.max(1))
@@ -72,21 +81,32 @@ pub fn run_hybrid_attack(
 
             if mask_segments.is_empty() {
                 // No mask – just hash the word directly
-                let hash = hash_candidate(&algo, word);
-                let current = tried.fetch_add(1, Ordering::Relaxed) + 1;
-                if hash == target {
+                let matched = candidate_matches(&algo, word, &target);
+                let _current = tried.fetch_add(1, Ordering::Relaxed) + 1;
+                if matched {
                     stop.store(true, Ordering::Relaxed);
                     *found.lock().unwrap() = Some(word.clone());
                 }
                 if let Some(ref sender) = tx {
-                    if current % 100_000 == 0 {
-                        let elapsed = start.elapsed().as_millis();
-                        let speed = if elapsed > 0 {
-                            current as f64 / (elapsed as f64 / 1000.0)
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    let last = last_progress_emit_ms.load(Ordering::Relaxed);
+                    if elapsed.saturating_sub(last) >= 100
+                        && last_progress_emit_ms
+                            .compare_exchange(last, elapsed, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                    {
+                        let total = tried.load(Ordering::Relaxed);
+                        let elapsed_ms = if total > 0 && elapsed == 0 {
+                            1
                         } else {
-                            0.0
+                            elapsed
                         };
-                        let _ = sender.send(Progress { tried: current, speed, elapsed_ms: elapsed });
+                        let speed = total as f64 / (elapsed_ms as f64 / 1000.0);
+                        let _ = sender.send(Progress {
+                            tried: total,
+                            speed,
+                            elapsed_ms: elapsed_ms as u128,
+                        });
                     }
                 }
                 return;
@@ -103,6 +123,7 @@ pub fn run_hybrid_attack(
                 &found,
                 &stop,
                 &tried,
+                &last_progress_emit_ms,
                 &start,
                 &tx,
             );
@@ -111,17 +132,18 @@ pub fn run_hybrid_attack(
 
     // Final progress update
     if let Some(ref sender) = tx {
-        let elapsed = start.elapsed().as_millis();
+        let elapsed = start.elapsed().as_millis() as u64;
         let total = tried.load(Ordering::Relaxed);
-        let speed = if elapsed > 0 {
-            total as f64 / (elapsed as f64 / 1000.0)
+        let elapsed_ms = if total > 0 && elapsed == 0 {
+            1
         } else {
-            0.0
+            elapsed
         };
+        let speed = total as f64 / (elapsed_ms as f64 / 1000.0);
         let _ = sender.send(Progress {
             tried: total,
             speed,
-            elapsed_ms: elapsed,
+            elapsed_ms: elapsed_ms as u128,
         });
     }
 
@@ -172,5 +194,20 @@ mod tests {
         };
         let result = run_hybrid_attack(job, None).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_hybrid_bcrypt_found() {
+        let target = ::bcrypt::hash("pass4", 4).unwrap();
+        let wl = make_wordlist(&["pass", "word"]);
+        let job = HybridJob {
+            hash: target,
+            wordlist_path: wl.path().to_str().unwrap().to_string(),
+            mask: "?d".to_string(),
+            algorithm: "bcrypt".to_string(),
+            threads: 1,
+        };
+        let result = run_hybrid_attack(job, None).unwrap();
+        assert_eq!(result, Some("pass4".to_string()));
     }
 }

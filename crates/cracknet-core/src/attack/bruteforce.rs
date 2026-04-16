@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::algorithms::{md5, ntlm, sha};
+use crate::algorithms::{bcrypt, md5, ntlm, sha};
 use crate::progress::Progress;
 
 /// Charsets for mask tokens (Phase 2: no custom charsets).
@@ -92,16 +92,19 @@ pub fn keyspace_size(segments: &[MaskSegment]) -> u64 {
     })
 }
 
-/// Hash a string with the given algorithm.
-fn hash_candidate(algo: &str, word: &str) -> String {
-    match algo {
+fn candidate_matches(algo: &str, word: &str, target: &str) -> bool {
+    if algo == "bcrypt" {
+        return bcrypt::verify(word, target);
+    }
+    let hash = match algo {
         "md5" | "md5_or_ntlm" => md5::hash(word),
         "sha1" => sha::sha1(word),
         "sha256" => sha::sha256(word),
         "sha512" => sha::sha512(word),
         "ntlm" => ntlm::hash(word),
         _ => md5::hash(word),
-    }
+    };
+    hash == target
 }
 
 /// Generate all candidates from `segments` recursively,
@@ -115,6 +118,7 @@ pub fn generate_candidates(
     found: &Mutex<Option<String>>,
     stop: &AtomicBool,
     tried: &AtomicU64,
+    last_progress_emit_ms: &AtomicU64,
     start: &Instant,
     tx: &Option<std::sync::mpsc::Sender<Progress>>,
 ) {
@@ -127,26 +131,33 @@ pub fn generate_candidates(
             Ok(s) => s,
             Err(_) => return,
         };
-        let hash = hash_candidate(algo, candidate);
-        let current = tried.fetch_add(1, Ordering::Relaxed) + 1;
+        let matched = candidate_matches(algo, candidate, target);
+        let _current = tried.fetch_add(1, Ordering::Relaxed) + 1;
 
         if let Some(ref sender) = tx {
-            if current % 100_000 == 0 {
-                let elapsed = start.elapsed().as_millis();
-                let speed = if elapsed > 0 {
-                    current as f64 / (elapsed as f64 / 1000.0)
+            let elapsed = start.elapsed().as_millis() as u64;
+            let last = last_progress_emit_ms.load(Ordering::Relaxed);
+            if elapsed.saturating_sub(last) >= 100
+                && last_progress_emit_ms
+                    .compare_exchange(last, elapsed, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                let total = tried.load(Ordering::Relaxed);
+                let elapsed_ms = if total > 0 && elapsed == 0 {
+                    1
                 } else {
-                    0.0
+                    elapsed
                 };
+                let speed = total as f64 / (elapsed_ms as f64 / 1000.0);
                 let _ = sender.send(Progress {
-                    tried: current,
+                    tried: total,
                     speed,
-                    elapsed_ms: elapsed,
+                    elapsed_ms: elapsed_ms as u128,
                 });
             }
         }
 
-        if hash == target {
+        if matched {
             stop.store(true, Ordering::Relaxed);
             let mut guard = found.lock().unwrap();
             *guard = Some(candidate.to_string());
@@ -166,6 +177,7 @@ pub fn generate_candidates(
                 found,
                 stop,
                 tried,
+                last_progress_emit_ms,
                 start,
                 tx,
             );
@@ -185,6 +197,7 @@ pub fn generate_candidates(
                     found,
                     stop,
                     tried,
+                    last_progress_emit_ms,
                     start,
                     tx,
                 );
@@ -215,17 +228,24 @@ pub fn run_bruteforce_attack(
         return Ok(None);
     }
 
-    let target = job.hash.to_lowercase();
+    let target = if job.algorithm.eq_ignore_ascii_case("bcrypt") {
+        job.hash.clone()
+    } else {
+        job.hash.to_lowercase()
+    };
     let found = Arc::new(Mutex::new(None::<String>));
     let stop = Arc::new(AtomicBool::new(false));
     let tried = Arc::new(AtomicU64::new(0));
+    let last_progress_emit_ms = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
     let algo = job.algorithm.to_lowercase();
 
     // Parallelize over the first Token segment's charset,
     // keeping the remaining segments for sequential inner expansion.
     // Find the first Token segment.
-    let first_token_idx = segments.iter().position(|s| matches!(s, MaskSegment::Token(_)));
+    let first_token_idx = segments
+        .iter()
+        .position(|s| matches!(s, MaskSegment::Token(_)));
 
     match first_token_idx {
         None => {
@@ -244,6 +264,7 @@ pub fn run_bruteforce_attack(
                     &found,
                     &stop,
                     &tried,
+                    &last_progress_emit_ms,
                     &start,
                     &tx,
                 );
@@ -259,10 +280,13 @@ pub fn run_bruteforce_attack(
             };
 
             // Prefix bytes (all Fixed)
-            let prefix_bytes: Vec<u8> = prefix.iter().flat_map(|s| match s {
-                MaskSegment::Fixed(b) => b.clone(),
-                MaskSegment::Token(_) => vec![],
-            }).collect();
+            let prefix_bytes: Vec<u8> = prefix
+                .iter()
+                .flat_map(|s| match s {
+                    MaskSegment::Fixed(b) => b.clone(),
+                    MaskSegment::Token(_) => vec![],
+                })
+                .collect();
 
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(job.threads.max(1))
@@ -284,6 +308,7 @@ pub fn run_bruteforce_attack(
                         &found,
                         &stop,
                         &tried,
+                        &last_progress_emit_ms,
                         &start,
                         &tx,
                     );
@@ -294,17 +319,18 @@ pub fn run_bruteforce_attack(
 
     // Final progress
     if let Some(ref sender) = tx {
-        let elapsed = start.elapsed().as_millis();
+        let elapsed = start.elapsed().as_millis() as u64;
         let total = tried.load(Ordering::Relaxed);
-        let speed = if elapsed > 0 {
-            total as f64 / (elapsed as f64 / 1000.0)
+        let elapsed_ms = if total > 0 && elapsed == 0 {
+            1
         } else {
-            0.0
+            elapsed
         };
+        let speed = total as f64 / (elapsed_ms as f64 / 1000.0);
         let _ = sender.send(Progress {
             tried: total,
             speed,
-            elapsed_ms: elapsed,
+            elapsed_ms: elapsed_ms as u128,
         });
     }
 
@@ -397,5 +423,18 @@ mod tests {
         };
         let result = run_bruteforce_attack(job, None).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_bruteforce_bcrypt_found() {
+        let target = ::bcrypt::hash("ab", 4).unwrap();
+        let job = BruteforceJob {
+            hash: target,
+            mask: "a?l".to_string(),
+            algorithm: "bcrypt".to_string(),
+            threads: 1,
+        };
+        let result = run_bruteforce_attack(job, None).unwrap();
+        assert_eq!(result, Some("ab".to_string()));
     }
 }

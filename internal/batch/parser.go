@@ -66,11 +66,6 @@ func parseLine(line string) *HashEntry {
 		return nil
 	}
 
-	// Crypt-style hashes start with '$' – the whole line (or rest after colon) is the hash.
-	if strings.HasPrefix(line, "$") {
-		return &HashEntry{Hash: line}
-	}
-
 	// Split on the FIRST colon only.
 	idx := strings.IndexByte(line, ':')
 	if idx < 0 {
@@ -81,14 +76,14 @@ func parseLine(line string) *HashEntry {
 	left := line[:idx]
 	right := line[idx+1:]
 
+	// If the right-hand side is a known algorithm name → hash:algorithm.
+	if knownAlgorithms[strings.ToLower(right)] && looksLikeHash(left) {
+		return &HashEntry{Hash: left, Algorithm: strings.ToLower(right)}
+	}
+
 	// If the right-hand side starts with '$' it is a crypt hash → username:hash.
 	if strings.HasPrefix(right, "$") {
 		return &HashEntry{Hash: right, Username: left}
-	}
-
-	// If the right-hand side is a known algorithm name → hash:algorithm.
-	if knownAlgorithms[strings.ToLower(right)] {
-		return &HashEntry{Hash: left, Algorithm: strings.ToLower(right)}
 	}
 
 	// If the left-hand side looks like a hash → hash (ignore right, e.g. trailing username).

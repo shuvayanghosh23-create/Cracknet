@@ -1,14 +1,14 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::algorithms::{md5, ntlm, sha};
+use crate::algorithms::{bcrypt, md5, ntlm, sha};
 use crate::attack::AttackJob;
 use crate::progress::Progress;
 
@@ -29,11 +29,12 @@ pub fn run_dictionary_attack(
         .map(|l| l.trim_end_matches('\r').to_string())
         .collect();
 
-    let target = job.hash.to_lowercase();
+    let normalized_target = job.hash.to_lowercase();
     let found = Arc::new(std::sync::Mutex::new(None::<String>));
     let stop = Arc::new(AtomicBool::new(false));
 
     let tried = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let last_progress_emit_ms = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
 
     // Build thread pool respecting the requested thread count
@@ -43,6 +44,12 @@ pub fn run_dictionary_attack(
         .map_err(|e| format!("Thread pool error: {e}"))?;
 
     let algo = job.algorithm.to_lowercase();
+    let is_bcrypt = algo == "bcrypt";
+    let target = if is_bcrypt {
+        job.hash.clone()
+    } else {
+        normalized_target
+    };
 
     pool.install(|| {
         words.par_iter().for_each(|word| {
@@ -50,35 +57,46 @@ pub fn run_dictionary_attack(
                 return;
             }
 
-            let candidate = match algo.as_str() {
-                "md5" => md5::hash(word),
-                "sha1" => sha::sha1(word),
-                "sha256" => sha::sha256(word),
-                "sha512" => sha::sha512(word),
-                "ntlm" => ntlm::hash(word),
-                _ => md5::hash(word),
+            let matched = if is_bcrypt {
+                bcrypt::verify(word, &target)
+            } else {
+                let candidate = match algo.as_str() {
+                    "md5" => md5::hash(word),
+                    "sha1" => sha::sha1(word),
+                    "sha256" => sha::sha256(word),
+                    "sha512" => sha::sha512(word),
+                    "ntlm" => ntlm::hash(word),
+                    _ => md5::hash(word),
+                };
+                candidate == target
             };
 
-            let current = tried.fetch_add(1, Ordering::Relaxed) + 1;
+            let _current = tried.fetch_add(1, Ordering::Relaxed) + 1;
 
-            // Send progress every 100 k words (roughly every ~100 ms at high speed)
             if let Some(ref sender) = tx {
-                if current % 100_000 == 0 {
-                    let elapsed = start.elapsed().as_millis();
-                    let speed = if elapsed > 0 {
-                        current as f64 / (elapsed as f64 / 1000.0)
+                let elapsed = start.elapsed().as_millis() as u64;
+                let last = last_progress_emit_ms.load(Ordering::Relaxed);
+                if elapsed.saturating_sub(last) >= 100
+                    && last_progress_emit_ms
+                        .compare_exchange(last, elapsed, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    let total = tried.load(Ordering::Relaxed);
+                    let elapsed_ms = if total > 0 && elapsed == 0 {
+                        1
                     } else {
-                        0.0
+                        elapsed
                     };
+                    let speed = total as f64 / (elapsed_ms as f64 / 1000.0);
                     let _ = sender.send(Progress {
-                        tried: current,
+                        tried: total,
                         speed,
-                        elapsed_ms: elapsed,
+                        elapsed_ms: elapsed_ms as u128,
                     });
                 }
             }
 
-            if candidate == target {
+            if matched {
                 stop.store(true, Ordering::Relaxed);
                 let mut guard = found.lock().unwrap();
                 *guard = Some(word.clone());
@@ -88,17 +106,18 @@ pub fn run_dictionary_attack(
 
     // Final progress update
     if let Some(ref sender) = tx {
-        let elapsed = start.elapsed().as_millis();
+        let elapsed = start.elapsed().as_millis() as u64;
         let total = tried.load(Ordering::Relaxed);
-        let speed = if elapsed > 0 {
-            total as f64 / (elapsed as f64 / 1000.0)
+        let elapsed_ms = if total > 0 && elapsed == 0 {
+            1
         } else {
-            0.0
+            elapsed
         };
+        let speed = total as f64 / (elapsed_ms as f64 / 1000.0);
         let _ = sender.send(Progress {
             tried: total,
             speed,
-            elapsed_ms: elapsed,
+            elapsed_ms: elapsed_ms as u128,
         });
     }
 
@@ -144,5 +163,19 @@ mod tests {
         };
         let result = run_dictionary_attack(job, None).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_dictionary_bcrypt_found() {
+        let wl = make_wordlist(&["hello", "password", "world"]);
+        let bcrypt_hash = ::bcrypt::hash("password", 4).unwrap();
+        let job = AttackJob {
+            hash: bcrypt_hash,
+            wordlist_path: wl.path().to_str().unwrap().to_string(),
+            algorithm: "bcrypt".to_string(),
+            threads: 1,
+        };
+        let result = run_dictionary_attack(job, None).unwrap();
+        assert_eq!(result, Some("password".to_string()));
     }
 }
