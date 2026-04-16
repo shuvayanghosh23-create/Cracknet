@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -317,73 +320,121 @@ func runBatchCrack(
 	crackedCount := 0
 	total := len(entries)
 
-	for algo, group := range groups {
-		fmt.Printf("\n  [%s] %d hash(es)\n", algo, len(group))
+	algorithms := make([]string, 0, len(groups))
+	for algo := range groups {
+		algorithms = append(algorithms, algo)
+	}
+	sort.Strings(algorithms)
+
+	wordlistSize := -1
+	if wordlistFlag != "" && (effectiveMode == "dictionary" || effectiveMode == "hybrid") {
+		wordlistSize = countWordlistLines(wordlistFlag)
+	}
+
+	for _, algo := range algorithms {
+		group := groups[algo]
 		groupStart := time.Now()
 		groupCracked := 0
 		groupLineActive := false
+		cachedProcessed := 0
+		toCrack := make([]string, 0, len(group))
+		crackedList := make([]string, 0, len(group))
 
-		for idx, entry := range group {
+		for _, entry := range group {
 			h := entry.Hash
-
-			// Check pot file cache first
 			if potDB != nil {
 				if cached, err := potDB.LookupHash(h); err == nil && cached != nil {
-					if groupLineActive {
-						fmt.Println()
-						groupLineActive = false
-					}
-					display.PrintResult(display.Result{
-						Hash:      h,
-						Plaintext: cached.Plaintext,
-						Algorithm: cached.Algorithm,
-						Cracked:   true,
-					})
-					fmt.Println("  (from cache)")
-					crackedCount++
+					cachedProcessed++
 					groupCracked++
+					crackedCount++
+					crackedList = append(crackedList, fmt.Sprintf("%s => %s (cache)", shortHash(h), cached.Plaintext))
 					continue
 				}
 			}
+			toCrack = append(toCrack, h)
+		}
 
-			progressFn := func(tried uint64, speed float64, elapsedMs uint64) {
-				elapsed := (time.Duration(elapsedMs) * time.Millisecond).Round(time.Second)
-				fmt.Printf("\r  [%s] %d/%d processed | current tried: %d | %.2f H/s | elapsed: %s   ",
-					algo, idx+1, len(group), tried, speed, elapsed)
-				groupLineActive = true
+		workers := threadsFlag
+		if algo == "bcrypt" {
+			workers = minInt(len(group), minInt(threadsFlag, runtime.NumCPU()))
+		}
+		fmt.Printf("\n  Batch session: algo=%s | total=%d | mode=%s | wordlist=%s | threads=%d | workers=%d\n",
+			algo, len(group), effectiveMode, formatWordlistSize(wordlistSize), threadsFlag, workers)
+
+		if cachedProcessed > 0 {
+			fmt.Printf("  Cached cracked: %d\n", cachedProcessed)
+		}
+
+		progressCb := func(msg bridge.Message) {
+			totalProcessed := cachedProcessed + msg.ProcessedHashes
+			totalCracked := groupCracked
+			if msg.CrackedHashes > 0 {
+				totalCracked = cachedProcessed + msg.CrackedHashes
 			}
+			remaining := len(group) - totalProcessed
+			if remaining < 0 {
+				remaining = 0
+			}
+			current := ""
+			if msg.CurrentHash != nil && *msg.CurrentHash != "" {
+				current = shortHash(*msg.CurrentHash)
+			}
+			bar := progressBar(totalProcessed, len(group), 30)
+			elapsed := (time.Duration(msg.ElapsedMs) * time.Millisecond).Round(time.Second)
+			fmt.Printf("\r  %s %3d%% | processed %d/%d | cracked %d | remaining %d | tried %d | %.2f H/s | elapsed %s | current %s   ",
+				bar,
+				percent(totalProcessed, len(group)),
+				totalProcessed,
+				len(group),
+				totalCracked,
+				remaining,
+				msg.Tried,
+				msg.Speed,
+				elapsed,
+				current,
+			)
+			groupLineActive = true
+		}
 
-			msg, err := callCrack(h, wordlistFlag, maskFlag, algo, effectiveMode, threadsFlag, progressFn)
+		resultCb := func(msg bridge.Message) {
+			if !msg.Cracked {
+				return
+			}
+			groupCracked++
+			crackedCount++
+			plain := ""
+			if msg.Plaintext != nil {
+				plain = *msg.Plaintext
+			}
+			if potDB != nil && plain != "" {
+				_ = potDB.SaveHash(msg.Hash, plain, algo)
+			}
+			if groupLineActive {
+				fmt.Println()
+				groupLineActive = false
+			}
+			entry := fmt.Sprintf("%s => %s", shortHash(msg.Hash), plain)
+			crackedList = append(crackedList, entry)
+			fmt.Printf("  ✓ %s\n", entry)
+		}
+
+		if len(toCrack) > 0 {
+			msg, err := bridge.RunCrackBatch(toCrack, wordlistFlag, maskFlag, algo, effectiveMode, threadsFlag, progressCb, resultCb)
 			if err != nil {
 				if groupLineActive {
 					fmt.Println()
 					groupLineActive = false
 				}
-				display.PrintError(fmt.Sprintf("%s: %v", h, err))
+				display.PrintError(fmt.Sprintf("[%s] batch crack failed: %v", algo, err))
 				continue
 			}
-
-			if msg.Cracked && msg.Plaintext != nil && potDB != nil {
-				_ = potDB.SaveHash(h, *msg.Plaintext, algo)
-			}
-
-			if msg.Cracked {
+			if msg.Type == "error" {
 				if groupLineActive {
 					fmt.Println()
 					groupLineActive = false
 				}
-				result := display.Result{
-					Hash:      h,
-					Algorithm: algo,
-					ElapsedMs: msg.ElapsedMs,
-					Cracked:   true,
-				}
-				if msg.Plaintext != nil {
-					result.Plaintext = *msg.Plaintext
-				}
-				display.PrintResult(result)
-				crackedCount++
-				groupCracked++
+				display.PrintError(fmt.Sprintf("[%s] %s", algo, msg.Msg))
+				continue
 			}
 		}
 
@@ -396,10 +447,86 @@ func runBatchCrack(
 			len(group),
 			time.Since(groupStart).Round(time.Millisecond),
 		)
+		if len(crackedList) > 0 {
+			maxShow := len(crackedList)
+			if maxShow > 8 {
+				maxShow = 8
+			}
+			fmt.Printf("  Cracked list (%d total, showing %d):\n", len(crackedList), maxShow)
+			for i := 0; i < maxShow; i++ {
+				fmt.Printf("    - %s\n", crackedList[i])
+			}
+		}
 	}
 
 	fmt.Printf("\n  Batch complete: %d/%d cracked.\n", crackedCount, total)
 	return nil
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func shortHash(hash string) string {
+	if len(hash) <= 18 {
+		return hash
+	}
+	return hash[:8] + "…" + hash[len(hash)-8:]
+}
+
+func progressBar(done, total, width int) string {
+	if total <= 0 {
+		return "[" + strings.Repeat("░", width) + "]"
+	}
+	if done < 0 {
+		done = 0
+	}
+	if done > total {
+		done = total
+	}
+	filled := int(float64(done) / float64(total) * float64(width))
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", width-filled) + "]"
+}
+
+func percent(done, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	if done < 0 {
+		done = 0
+	}
+	if done > total {
+		done = total
+	}
+	return int(float64(done) * 100 / float64(total))
+}
+
+func countWordlistLines(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return -1
+	}
+	defer f.Close()
+
+	count := 0
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		count++
+	}
+	if err := scanner.Err(); err != nil {
+		return -1
+	}
+	return count
+}
+
+func formatWordlistSize(n int) string {
+	if n < 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d entries", n)
 }
 
 // resolveMode determines the effective attack mode from user flags.

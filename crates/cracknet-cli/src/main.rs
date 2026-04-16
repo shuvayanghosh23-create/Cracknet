@@ -5,7 +5,10 @@ use std::sync::mpsc;
 
 use cracknet_core::{
     analyze::detect_hash_type,
-    job::{execute_job_with_progress, Job},
+    job::{
+        execute_batch_job_with_progress, execute_job_with_progress, BatchJob, BatchProgress,
+        BatchResultItem, Job,
+    },
     progress::Progress,
 };
 
@@ -28,6 +31,28 @@ enum OutputMessage {
         plaintext: Option<String>,
         elapsed_ms: u64,
     },
+    BatchProgress {
+        processed_hashes: usize,
+        total_hashes: usize,
+        cracked_hashes: usize,
+        tried: u64,
+        speed: f64,
+        elapsed_ms: u64,
+        current_hash: Option<String>,
+    },
+    BatchResult {
+        hash: String,
+        cracked: bool,
+        plaintext: Option<String>,
+        elapsed_ms: u64,
+    },
+    BatchSummary {
+        total_hashes: usize,
+        processed_hashes: usize,
+        cracked_hashes: usize,
+        tried: u64,
+        elapsed_ms: u64,
+    },
     Error {
         message: String,
     },
@@ -41,9 +66,12 @@ fn main() {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
-                emit(&stdout, &OutputMessage::Error {
-                    message: format!("Read error: {e}"),
-                });
+                emit(
+                    &stdout,
+                    &OutputMessage::Error {
+                        message: format!("Read error: {e}"),
+                    },
+                );
                 break;
             }
         };
@@ -55,9 +83,12 @@ fn main() {
         let value: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                emit(&stdout, &OutputMessage::Error {
-                    message: format!("JSON parse error: {e}"),
-                });
+                emit(
+                    &stdout,
+                    &OutputMessage::Error {
+                        message: format!("JSON parse error: {e}"),
+                    },
+                );
                 continue;
             }
         };
@@ -77,19 +108,25 @@ fn main() {
                     .unwrap_or("")
                     .to_string();
                 let (algorithm, confidence, difficulty) = detect_hash_type(&hash);
-                emit(&stdout, &OutputMessage::HashInfo {
-                    algorithm,
-                    confidence,
-                    difficulty,
-                });
+                emit(
+                    &stdout,
+                    &OutputMessage::HashInfo {
+                        algorithm,
+                        confidence,
+                        difficulty,
+                    },
+                );
             }
             "crack" => {
                 let job: Job = match serde_json::from_value(value.clone()) {
                     Ok(j) => j,
                     Err(e) => {
-                        emit(&stdout, &OutputMessage::Error {
-                            message: format!("Invalid crack job: {e}"),
-                        });
+                        emit(
+                            &stdout,
+                            &OutputMessage::Error {
+                                message: format!("Invalid crack job: {e}"),
+                            },
+                        );
                         continue;
                     }
                 };
@@ -101,11 +138,14 @@ fn main() {
                 // Spawn a thread to forward progress messages
                 let progress_thread = std::thread::spawn(move || {
                     for p in rx {
-                        emit(&stdout_clone, &OutputMessage::Progress {
-                            tried: p.tried,
-                            speed: p.speed,
-                            elapsed_ms: p.elapsed_ms,
-                        });
+                        emit(
+                            &stdout_clone,
+                            &OutputMessage::Progress {
+                                tried: p.tried,
+                                speed: p.speed,
+                                elapsed_ms: p.elapsed_ms,
+                            },
+                        );
                     }
                 });
 
@@ -117,21 +157,96 @@ fn main() {
 
                 match result {
                     Ok(result) => {
-                        emit(&stdout, &OutputMessage::Result {
-                            cracked: result.cracked,
-                            plaintext: result.plaintext,
-                            elapsed_ms: result.elapsed_ms,
-                        });
+                        emit(
+                            &stdout,
+                            &OutputMessage::Result {
+                                cracked: result.cracked,
+                                plaintext: result.plaintext,
+                                elapsed_ms: result.elapsed_ms,
+                            },
+                        );
                     }
                     Err(e) => {
                         emit(&stdout, &OutputMessage::Error { message: e });
                     }
                 }
             }
-            other => {
-                emit(&stdout, &OutputMessage::Error {
-                    message: format!("Unknown message type: '{other}'"),
+            "crack_batch" => {
+                let job: BatchJob = match serde_json::from_value(value.clone()) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        emit(
+                            &stdout,
+                            &OutputMessage::Error {
+                                message: format!("Invalid crack_batch job: {e}"),
+                            },
+                        );
+                        continue;
+                    }
+                };
+
+                let (progress_tx, progress_rx) = mpsc::channel::<BatchProgress>();
+                let (result_tx, result_rx) = mpsc::channel::<BatchResultItem>();
+                let stdout_progress = io::stdout();
+                let stdout_result = io::stdout();
+
+                let progress_thread = std::thread::spawn(move || {
+                    for p in progress_rx {
+                        emit(
+                            &stdout_progress,
+                            &OutputMessage::BatchProgress {
+                                processed_hashes: p.processed_hashes,
+                                total_hashes: p.total_hashes,
+                                cracked_hashes: p.cracked_hashes,
+                                tried: p.tried,
+                                speed: p.speed,
+                                elapsed_ms: p.elapsed_ms,
+                                current_hash: p.current_hash,
+                            },
+                        );
+                    }
                 });
+
+                let result_thread = std::thread::spawn(move || {
+                    for r in result_rx {
+                        emit(
+                            &stdout_result,
+                            &OutputMessage::BatchResult {
+                                hash: r.hash,
+                                cracked: r.cracked,
+                                plaintext: r.plaintext,
+                                elapsed_ms: r.elapsed_ms,
+                            },
+                        );
+                    }
+                });
+
+                let result =
+                    execute_batch_job_with_progress(job, Some(progress_tx), Some(result_tx));
+                let _ = progress_thread.join();
+                let _ = result_thread.join();
+
+                match result {
+                    Ok(summary) => emit(
+                        &stdout,
+                        &OutputMessage::BatchSummary {
+                            total_hashes: summary.total_hashes,
+                            processed_hashes: summary.processed_hashes,
+                            cracked_hashes: summary.cracked_hashes,
+                            tried: summary.tried,
+                            elapsed_ms: summary.elapsed_ms,
+                        },
+                    ),
+                    Err(e) => emit(&stdout, &OutputMessage::Error { message: e }),
+                }
+            }
+            other => {
+                emit(
+                    &stdout,
+                    &OutputMessage::Error {
+                        message: format!("Unknown message type: '{other}'"),
+                    },
+                );
             }
         }
     }

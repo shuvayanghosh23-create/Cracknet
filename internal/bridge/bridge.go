@@ -11,31 +11,39 @@ import (
 
 // JobRequest is the message sent to the Rust binary.
 type JobRequest struct {
-	Type      string  `json:"type"`
-	Hash      string  `json:"hash"`
-	Wordlist  *string `json:"wordlist,omitempty"`
-	Algorithm string  `json:"algorithm,omitempty"`
-	Threads   int     `json:"threads,omitempty"`
-	Mask      *string `json:"mask,omitempty"`
-	Mode      string  `json:"mode,omitempty"`
+	Type      string   `json:"type"`
+	Hash      string   `json:"hash,omitempty"`
+	Hashes    []string `json:"hashes,omitempty"`
+	Wordlist  *string  `json:"wordlist,omitempty"`
+	Algorithm string   `json:"algorithm,omitempty"`
+	Threads   int      `json:"threads,omitempty"`
+	Mask      *string  `json:"mask,omitempty"`
+	Mode      string   `json:"mode,omitempty"`
 }
 
 // Message is a generic JSON message received from the Rust binary.
 type Message struct {
-	Type       string  `json:"type"`
-	Algorithm  string  `json:"algorithm,omitempty"`
-	Confidence float32 `json:"confidence,omitempty"`
-	Difficulty string  `json:"difficulty,omitempty"`
-	Cracked    bool    `json:"cracked,omitempty"`
-	Plaintext  *string `json:"plaintext,omitempty"`
-	ElapsedMs  uint64  `json:"elapsed_ms,omitempty"`
-	Tried      uint64  `json:"tried,omitempty"`
-	Speed      float64 `json:"speed,omitempty"`
-	Msg        string  `json:"message,omitempty"`
+	Type            string  `json:"type"`
+	Hash            string  `json:"hash,omitempty"`
+	Algorithm       string  `json:"algorithm,omitempty"`
+	Confidence      float32 `json:"confidence,omitempty"`
+	Difficulty      string  `json:"difficulty,omitempty"`
+	Cracked         bool    `json:"cracked,omitempty"`
+	Plaintext       *string `json:"plaintext,omitempty"`
+	ElapsedMs       uint64  `json:"elapsed_ms,omitempty"`
+	Tried           uint64  `json:"tried,omitempty"`
+	Speed           float64 `json:"speed,omitempty"`
+	ProcessedHashes int     `json:"processed_hashes,omitempty"`
+	TotalHashes     int     `json:"total_hashes,omitempty"`
+	CrackedHashes   int     `json:"cracked_hashes,omitempty"`
+	CurrentHash     *string `json:"current_hash,omitempty"`
+	Msg             string  `json:"message,omitempty"`
 }
 
 // ProgressCallback is called when a progress update is received.
 type ProgressCallback func(tried uint64, speed float64, elapsedMs uint64)
+type BatchProgressCallback func(msg Message)
+type BatchResultCallback func(msg Message)
 
 // RunAnalyze asks the Rust binary to detect the hash type.
 func RunAnalyze(hash string) (*Message, error) {
@@ -105,8 +113,41 @@ func RunCrackAuto(hash, wordlist, mask, algorithm string, threads int, progress 
 	return call(req, progress)
 }
 
+// RunCrackBatch asks the Rust binary to run a batch crack for one algorithm group.
+func RunCrackBatch(
+	hashes []string,
+	wordlist, mask, algorithm, mode string,
+	threads int,
+	progress BatchProgressCallback,
+	result BatchResultCallback,
+) (*Message, error) {
+	req := JobRequest{
+		Type:      "crack_batch",
+		Hashes:    hashes,
+		Algorithm: algorithm,
+		Threads:   threads,
+		Mode:      mode,
+	}
+	if wordlist != "" {
+		req.Wordlist = &wordlist
+	}
+	if mask != "" {
+		req.Mask = &mask
+	}
+	return callWithCallbacks(req, nil, progress, result)
+}
+
 // call spawns the Rust binary, sends req as JSON, and reads responses.
 func call(req JobRequest, progress ProgressCallback) (*Message, error) {
+	return callWithCallbacks(req, progress, nil, nil)
+}
+
+func callWithCallbacks(
+	req JobRequest,
+	progress ProgressCallback,
+	batchProgress BatchProgressCallback,
+	batchResult BatchResultCallback,
+) (*Message, error) {
 	binary := findBinary()
 
 	input, err := pipeInput(req)
@@ -151,6 +192,14 @@ func call(req JobRequest, progress ProgressCallback) (*Message, error) {
 		case "progress":
 			if progress != nil {
 				progress(msg.Tried, msg.Speed, msg.ElapsedMs)
+			}
+		case "batch_progress":
+			if batchProgress != nil {
+				batchProgress(msg)
+			}
+		case "batch_result":
+			if batchResult != nil {
+				batchResult(msg)
 			}
 		default:
 			result = &msg
