@@ -5,7 +5,10 @@ use md4::Md4;
 /// Compute NTLM hash of input (UTF-16LE + MD4), returning a lowercase hex string.
 pub fn hash(input: &str) -> String {
     // Encode to UTF-16 little-endian
-    let utf16_le: Vec<u8> = input.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let utf16_le: Vec<u8> = input
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
 
     let mut hasher = Md4::new();
     hasher.update(&utf16_le);
