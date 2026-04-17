@@ -442,7 +442,7 @@ func runBatchCrack(
 
 		recent := make([]string, 0, recentCrackedLimit)
 		for _, entry := range crackedList {
-			recent = appendWithLimit(recent, entry, recentCrackedLimit)
+			recent = appendRecentWithLimit(recent, entry, recentCrackedLimit)
 		}
 
 		workers := threadsFlag
@@ -524,7 +524,7 @@ func runBatchCrack(
 			entry := fmt.Sprintf("%s => %s", shortHash(msg.Hash), plain)
 			outLines = append(outLines, formatCrackedLine(msg.Hash, plain, algo))
 			crackedList = append(crackedList, entry)
-			recent = appendWithLimit(recent, entry, recentCrackedLimit)
+			recent = appendRecentWithLimit(recent, entry, recentCrackedLimit)
 			displayCracked = groupCracked
 			if verbose {
 				if groupLineActive {
@@ -612,6 +612,11 @@ func maxInt(a, b int) int {
 }
 
 const recentCrackedLimit = 10
+const (
+	gigaHashThreshold = 1_000_000_000
+	megaHashThreshold = 1_000_000
+	kiloHashThreshold = 1_000
+)
 
 var supportedCrackAlgorithms = map[string]bool{
 	"md5":         true,
@@ -630,7 +635,7 @@ func isCrackSupportedAlgorithm(algo string) bool {
 	return supportedCrackAlgorithms[strings.ToLower(strings.TrimSpace(algo))]
 }
 
-func appendWithLimit(items []string, entry string, max int) []string {
+func appendRecentWithLimit(items []string, entry string, max int) []string {
 	items = append(items, entry)
 	if len(items) <= max {
 		return items
@@ -648,14 +653,14 @@ func formatRecent(items []string) string {
 func formatSpeed(speed float64) string {
 	unit := "H/s"
 	switch {
-	case speed >= 1_000_000_000:
-		speed /= 1_000_000_000
+	case speed >= gigaHashThreshold:
+		speed /= gigaHashThreshold
 		unit = "GH/s"
-	case speed >= 1_000_000:
-		speed /= 1_000_000
+	case speed >= megaHashThreshold:
+		speed /= megaHashThreshold
 		unit = "MH/s"
-	case speed >= 1_000:
-		speed /= 1_000
+	case speed >= kiloHashThreshold:
+		speed /= kiloHashThreshold
 		unit = "KH/s"
 	}
 	return fmt.Sprintf("%.2f %s", speed, unit)

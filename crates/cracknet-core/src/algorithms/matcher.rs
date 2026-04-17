@@ -1,5 +1,6 @@
 use crate::algorithms::{bcrypt, md5, ntlm, sha};
 use pwhash::{md5_crypt, sha256_crypt, sha512_crypt};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub fn is_supported_algorithm(algo: &str) -> bool {
     matches!(
@@ -33,11 +34,18 @@ pub fn candidate_matches(algo: &str, candidate: &str, target: &str) -> bool {
         "sha256" => sha::sha256(candidate) == target,
         "sha512" => sha::sha512(candidate) == target,
         "ntlm" => ntlm::hash(candidate) == target,
-        "md5crypt" => md5_crypt::verify(candidate, target),
-        "sha256crypt" => sha256_crypt::verify(candidate, target),
-        "sha512crypt" => sha512_crypt::verify(candidate, target),
+        "md5crypt" => safe_verify(|| md5_crypt::verify(candidate, target)),
+        "sha256crypt" => safe_verify(|| sha256_crypt::verify(candidate, target)),
+        "sha512crypt" => safe_verify(|| sha512_crypt::verify(candidate, target)),
         _ => false,
     }
+}
+
+fn safe_verify<F>(verify_fn: F) -> bool
+where
+    F: FnOnce() -> bool,
+{
+    catch_unwind(AssertUnwindSafe(verify_fn)).unwrap_or(false)
 }
 
 #[cfg(test)]
