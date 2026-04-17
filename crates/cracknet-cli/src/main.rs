@@ -5,6 +5,7 @@ use std::sync::mpsc;
 
 use cracknet_core::{
     analyze::detect_hash_type,
+    dna::{analyze_patterns, detect_policy_bypasses, predict_crack_difficulty},
     job::{
         execute_batch_job_with_progress, execute_job_with_progress, BatchJob, BatchProgress,
         BatchResultItem, Job,
@@ -52,6 +53,15 @@ enum OutputMessage {
         cracked_hashes: usize,
         tried: u64,
         elapsed_ms: u64,
+    },
+    DnaReport {
+        report: cracknet_core::dna::DnaReport,
+    },
+    PolicyReport {
+        bypasses: Vec<cracknet_core::dna::PolicyBypass>,
+    },
+    PredictorReport {
+        result: cracknet_core::dna::PredictorResult,
     },
     Error {
         message: String,
@@ -239,6 +249,33 @@ fn main() {
                     ),
                     Err(e) => emit(&stdout, &OutputMessage::Error { message: e }),
                 }
+            }
+            "dna_analyze" => {
+                let plaintexts: Vec<String> = value
+                    .get("plaintexts")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                let refs: Vec<&str> = plaintexts.iter().map(|s| s.as_str()).collect();
+                let report = analyze_patterns(&refs);
+                emit(&stdout, &OutputMessage::DnaReport { report });
+            }
+            "policy_check" => {
+                let plaintext = value
+                    .get("plaintext")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let bypasses = detect_policy_bypasses(&plaintext);
+                emit(&stdout, &OutputMessage::PolicyReport { bypasses });
+            }
+            "predict" => {
+                let algorithm = value
+                    .get("algorithm")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let result = predict_crack_difficulty(&algorithm);
+                emit(&stdout, &OutputMessage::PredictorReport { result });
             }
             other => {
                 emit(
