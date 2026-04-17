@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::algorithms::{bcrypt, md5, ntlm, sha};
+use crate::algorithms::matcher;
 use crate::attack::bruteforce::{generate_candidates, parse_mask};
 use crate::progress::Progress;
 
@@ -21,21 +21,6 @@ pub struct HybridJob {
     pub mask: String,
     pub algorithm: String,
     pub threads: usize,
-}
-
-fn candidate_matches(algo: &str, word: &str, target: &str) -> bool {
-    if algo == "bcrypt" {
-        return bcrypt::verify(word, target);
-    }
-    let hash = match algo {
-        "md5" | "md5_or_ntlm" => md5::hash(word),
-        "sha1" => sha::sha1(word),
-        "sha256" => sha::sha256(word),
-        "sha512" => sha::sha512(word),
-        "ntlm" => ntlm::hash(word),
-        _ => md5::hash(word),
-    };
-    hash == target
 }
 
 /// Run a hybrid attack: for each word in the wordlist, expand `mask` and
@@ -57,11 +42,7 @@ pub fn run_hybrid_attack(
     let mask_segments = parse_mask(&job.mask)?;
 
     let algo = job.algorithm.to_lowercase();
-    let target = if algo == "bcrypt" {
-        job.hash.clone()
-    } else {
-        job.hash.to_lowercase()
-    };
+    let target = matcher::normalize_target_hash(&algo, &job.hash);
     let found = Arc::new(Mutex::new(None::<String>));
     let stop = Arc::new(AtomicBool::new(false));
     let tried = Arc::new(AtomicU64::new(0));
@@ -81,7 +62,7 @@ pub fn run_hybrid_attack(
 
             if mask_segments.is_empty() {
                 // No mask – just hash the word directly
-                let matched = candidate_matches(&algo, word, &target);
+                let matched = matcher::candidate_matches(&algo, word, &target);
                 let _current = tried.fetch_add(1, Ordering::Relaxed) + 1;
                 if matched {
                     stop.store(true, Ordering::Relaxed);
@@ -209,5 +190,19 @@ mod tests {
         };
         let result = run_hybrid_attack(job, None).unwrap();
         assert_eq!(result, Some("pass4".to_string()));
+    }
+
+    #[test]
+    fn test_hybrid_md5crypt_found() {
+        let wl = make_wordlist(&["pass", "word"]);
+        let job = HybridJob {
+            hash: "$1$5pZSV9va$azfrPr6af3Fc7dLblQXVa0".to_string(),
+            wordlist_path: wl.path().to_str().unwrap().to_string(),
+            mask: "word".to_string(),
+            algorithm: "md5crypt".to_string(),
+            threads: 1,
+        };
+        let result = run_hybrid_attack(job, None).unwrap();
+        assert_eq!(result, Some("password".to_string()));
     }
 }

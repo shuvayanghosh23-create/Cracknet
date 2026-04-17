@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::algorithms::{bcrypt, md5, ntlm, sha};
+use crate::algorithms::matcher;
 use crate::progress::Progress;
 
 /// Charsets for mask tokens (Phase 2: no custom charsets).
@@ -93,18 +93,7 @@ pub fn keyspace_size(segments: &[MaskSegment]) -> u64 {
 }
 
 fn candidate_matches(algo: &str, word: &str, target: &str) -> bool {
-    if algo == "bcrypt" {
-        return bcrypt::verify(word, target);
-    }
-    let hash = match algo {
-        "md5" | "md5_or_ntlm" => md5::hash(word),
-        "sha1" => sha::sha1(word),
-        "sha256" => sha::sha256(word),
-        "sha512" => sha::sha512(word),
-        "ntlm" => ntlm::hash(word),
-        _ => md5::hash(word),
-    };
-    hash == target
+    matcher::candidate_matches(algo, word, target)
 }
 
 /// Generate all candidates from `segments` recursively,
@@ -228,17 +217,13 @@ pub fn run_bruteforce_attack(
         return Ok(None);
     }
 
-    let target = if job.algorithm.eq_ignore_ascii_case("bcrypt") {
-        job.hash.clone()
-    } else {
-        job.hash.to_lowercase()
-    };
     let found = Arc::new(Mutex::new(None::<String>));
     let stop = Arc::new(AtomicBool::new(false));
     let tried = Arc::new(AtomicU64::new(0));
     let last_progress_emit_ms = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
     let algo = job.algorithm.to_lowercase();
+    let target = matcher::normalize_target_hash(&algo, &job.hash);
 
     // Parallelize over the first Token segment's charset,
     // keeping the remaining segments for sequential inner expansion.
@@ -436,5 +421,17 @@ mod tests {
         };
         let result = run_bruteforce_attack(job, None).unwrap();
         assert_eq!(result, Some("ab".to_string()));
+    }
+
+    #[test]
+    fn test_bruteforce_md5crypt_fixed_found() {
+        let job = BruteforceJob {
+            hash: "$1$5pZSV9va$azfrPr6af3Fc7dLblQXVa0".to_string(),
+            mask: "password".to_string(),
+            algorithm: "md5crypt".to_string(),
+            threads: 1,
+        };
+        let result = run_bruteforce_attack(job, None).unwrap();
+        assert_eq!(result, Some("password".to_string()));
     }
 }

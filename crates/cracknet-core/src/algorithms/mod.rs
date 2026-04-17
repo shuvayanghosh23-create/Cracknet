@@ -1,4 +1,5 @@
 pub mod bcrypt;
+pub mod matcher;
 pub mod md5;
 pub mod ntlm;
 pub mod sha;

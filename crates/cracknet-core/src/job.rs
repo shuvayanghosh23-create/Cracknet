@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+use crate::algorithms::matcher;
 use crate::attack::{
     bruteforce::{run_bruteforce_attack, BruteforceJob},
     dictionary::run_dictionary_attack,
@@ -119,6 +120,13 @@ pub fn execute_job_with_progress(
     tx: Option<Sender<Progress>>,
 ) -> Result<JobResult, String> {
     let start = std::time::Instant::now();
+    let algorithm = job.algorithm.to_lowercase();
+    if !matcher::is_supported_algorithm(&algorithm) {
+        return Err(format!(
+            "algorithm '{}' is not supported for cracking",
+            job.algorithm
+        ));
+    }
 
     let has_wordlist = job
         .wordlist
@@ -139,7 +147,7 @@ pub fn execute_job_with_progress(
                 BruteforceJob {
                     hash: job.hash.clone(),
                     mask: mask.to_string(),
-                    algorithm: job.algorithm.clone(),
+                    algorithm: algorithm.clone(),
                     threads: job.threads,
                 },
                 tx,
@@ -161,7 +169,7 @@ pub fn execute_job_with_progress(
                     hash: job.hash.clone(),
                     wordlist_path: wordlist.to_string(),
                     mask: mask.to_string(),
-                    algorithm: job.algorithm.clone(),
+                    algorithm: algorithm.clone(),
                     threads: job.threads,
                 },
                 tx,
@@ -178,7 +186,7 @@ pub fn execute_job_with_progress(
                 AttackJob {
                     hash: job.hash.clone(),
                     wordlist_path: wordlist.to_string(),
-                    algorithm: job.algorithm.clone(),
+                    algorithm: algorithm.clone(),
                     threads: job.threads,
                 },
                 tx,
@@ -314,7 +322,7 @@ fn run_single_hash_for_batch(
 
 /// Execute a batch cracking job and stream aggregated progress and per-hash results.
 pub fn execute_batch_job_with_progress(
-    job: BatchJob,
+    mut job: BatchJob,
     progress_tx: Option<Sender<BatchProgress>>,
     result_tx: Option<Sender<BatchResultItem>>,
 ) -> Result<BatchJobResult, String> {
@@ -339,6 +347,13 @@ pub fn execute_batch_job_with_progress(
     )));
 
     let algorithm = job.algorithm.to_lowercase();
+    if !matcher::is_supported_algorithm(&algorithm) {
+        return Err(format!(
+            "algorithm '{}' is not supported for cracking",
+            job.algorithm
+        ));
+    }
+    job.algorithm = algorithm.clone();
     if algorithm == "bcrypt" {
         let cpu_cores = std::thread::available_parallelism()
             .map(|n| n.get())
