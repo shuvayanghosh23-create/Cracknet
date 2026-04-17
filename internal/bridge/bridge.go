@@ -11,33 +11,39 @@ import (
 
 // JobRequest is the message sent to the Rust binary.
 type JobRequest struct {
-	Type      string   `json:"type"`
-	Hash      string   `json:"hash,omitempty"`
-	Hashes    []string `json:"hashes,omitempty"`
-	Wordlist  *string  `json:"wordlist,omitempty"`
-	Algorithm string   `json:"algorithm,omitempty"`
-	Threads   int      `json:"threads,omitempty"`
-	Mask      *string  `json:"mask,omitempty"`
-	Mode      string   `json:"mode,omitempty"`
+	Type       string   `json:"type"`
+	Hash       string   `json:"hash,omitempty"`
+	Hashes     []string `json:"hashes,omitempty"`
+	Wordlist   *string  `json:"wordlist,omitempty"`
+	Algorithm  string   `json:"algorithm,omitempty"`
+	Threads    int      `json:"threads,omitempty"`
+	Mask       *string  `json:"mask,omitempty"`
+	Mode       string   `json:"mode,omitempty"`
+	Plaintexts []string `json:"plaintexts,omitempty"`
+	Plaintext  string   `json:"plaintext,omitempty"`
 }
 
 // Message is a generic JSON message received from the Rust binary.
 type Message struct {
-	Type            string  `json:"type"`
-	Hash            string  `json:"hash,omitempty"`
-	Algorithm       string  `json:"algorithm,omitempty"`
-	Confidence      float32 `json:"confidence,omitempty"`
-	Difficulty      string  `json:"difficulty,omitempty"`
-	Cracked         bool    `json:"cracked,omitempty"`
-	Plaintext       *string `json:"plaintext,omitempty"`
-	ElapsedMs       uint64  `json:"elapsed_ms,omitempty"`
-	Tried           uint64  `json:"tried,omitempty"`
-	Speed           float64 `json:"speed,omitempty"`
-	ProcessedHashes int     `json:"processed_hashes,omitempty"`
-	TotalHashes     int     `json:"total_hashes,omitempty"`
-	CrackedHashes   int     `json:"cracked_hashes,omitempty"`
-	CurrentHash     *string `json:"current_hash,omitempty"`
-	Msg             string  `json:"message,omitempty"`
+	Type            string          `json:"type"`
+	Hash            string          `json:"hash,omitempty"`
+	Algorithm       string          `json:"algorithm,omitempty"`
+	Confidence      float32         `json:"confidence,omitempty"`
+	Difficulty      string          `json:"difficulty,omitempty"`
+	Cracked         bool            `json:"cracked,omitempty"`
+	Plaintext       *string         `json:"plaintext,omitempty"`
+	ElapsedMs       uint64          `json:"elapsed_ms,omitempty"`
+	Tried           uint64          `json:"tried,omitempty"`
+	Speed           float64         `json:"speed,omitempty"`
+	ProcessedHashes int             `json:"processed_hashes,omitempty"`
+	TotalHashes     int             `json:"total_hashes,omitempty"`
+	CrackedHashes   int             `json:"cracked_hashes,omitempty"`
+	CurrentHash     *string         `json:"current_hash,omitempty"`
+	Msg             string          `json:"message,omitempty"`
+	// Insight fields – populated by dna_analyze / policy_check / predict responses.
+	Report          json.RawMessage `json:"report,omitempty"`
+	Bypasses        json.RawMessage `json:"bypasses,omitempty"`
+	PredictorData   json.RawMessage `json:"result,omitempty"`
 }
 
 // ProgressCallback is called when a progress update is received.

@@ -17,6 +17,7 @@ import (
 	"cracknet/internal/config"
 	"cracknet/internal/db"
 	"cracknet/internal/display"
+	"cracknet/internal/insight"
 )
 
 func main() {
@@ -37,6 +38,7 @@ It uses a high-performance Rust engine for hashing and a Go shell for orchestrat
 	root.AddCommand(analyzeCmd())
 	root.AddCommand(crackCmd())
 	root.AddCommand(configCmd())
+	root.AddCommand(insightCmd())
 	return root
 }
 
@@ -98,6 +100,8 @@ func crackCmd() *cobra.Command {
 		modeFlag      string
 		threadsFlag   int
 		algorithmFlag string
+		onlyFlag      string
+		skipFlag      string
 	)
 
 	cmd := &cobra.Command{
@@ -114,9 +118,16 @@ Mask token reference:
   ?d  digits 0-9         ?s  special chars
   ?a  all printable       ?h  hex digits 0-9a-f
 
-Ambiguous 32-hex hashes (MD5 or NTLM) are treated as MD5 by default.`,
+Ambiguous 32-hex hashes (MD5 or NTLM) are treated as MD5 by default.
+
+When using --file, you can filter which algorithm groups to process:
+  --only md5,sha1     only crack those groups (comma-separated)
+  --skip bcrypt       skip those groups (comma-separated)
+(--only and --skip are mutually exclusive)`,
 		Example: `  cracknet crack --hash 5f4dcc3b5aa765d61d8327deb882cf99 --wordlist rockyou.txt
   cracknet crack --file hashes.txt --wordlist rockyou.txt
+  cracknet crack --file hashes.txt --wordlist rockyou.txt --only md5,sha1
+  cracknet crack --file hashes.txt --wordlist rockyou.txt --skip bcrypt
   cracknet crack --hash 5f4dcc3b5aa765d61d8327deb882cf99 --mask 'pass?d?d' --mode bruteforce
   cracknet crack --file hashes.txt --wordlist rockyou.txt --mask '?d?d' --mode hybrid
   cracknet crack --hash <sha256> --algorithm sha256 --wordlist wordlist.txt --threads 4`,
@@ -126,6 +137,9 @@ Ambiguous 32-hex hashes (MD5 or NTLM) are treated as MD5 by default.`,
 			}
 			if hashFlag != "" && fileFlag != "" {
 				return fmt.Errorf("--hash and --file are mutually exclusive")
+			}
+			if onlyFlag != "" && skipFlag != "" {
+				return fmt.Errorf("--only and --skip are mutually exclusive")
 			}
 
 			cfg, err := config.Load()
@@ -182,7 +196,7 @@ Ambiguous 32-hex hashes (MD5 or NTLM) are treated as MD5 by default.`,
 			}
 
 			if fileFlag != "" {
-				return runBatchCrack(fileFlag, wordlistFlag, maskFlag, modeFlag, algorithmFlag, threadsFlag, potDB, cfg)
+				return runBatchCrack(fileFlag, wordlistFlag, maskFlag, modeFlag, algorithmFlag, threadsFlag, onlyFlag, skipFlag, potDB, cfg)
 			}
 			return runSingleCrack(hashFlag, wordlistFlag, maskFlag, modeFlag, algorithmFlag, threadsFlag, potDB)
 		},
@@ -195,6 +209,8 @@ Ambiguous 32-hex hashes (MD5 or NTLM) are treated as MD5 by default.`,
 	cmd.Flags().StringVar(&modeFlag, "mode", "", "Attack mode: dictionary|bruteforce|hybrid|auto (default auto)")
 	cmd.Flags().IntVar(&threadsFlag, "threads", 0, "Number of threads (default from config)")
 	cmd.Flags().StringVar(&algorithmFlag, "algorithm", "", "Hash algorithm override (auto-detect if omitted)")
+	cmd.Flags().StringVar(&onlyFlag, "only", "", "Comma-separated list of algorithms to crack (e.g. md5,sha1)")
+	cmd.Flags().StringVar(&skipFlag, "skip", "", "Comma-separated list of algorithms to skip (e.g. bcrypt,sha512crypt)")
 	return cmd
 }
 
@@ -281,6 +297,7 @@ func runSingleCrack(
 func runBatchCrack(
 	fileFlag, wordlistFlag, maskFlag, modeFlag, algorithmFlag string,
 	threadsFlag int,
+	onlyFlag, skipFlag string,
 	potDB *db.DB,
 	cfg config.Config,
 ) error {
@@ -293,6 +310,19 @@ func runBatchCrack(
 	}
 
 	fmt.Printf("  Loaded %d unique hash(es) from %s\n", len(entries), fileFlag)
+
+	// Save metadata for each entry when a pot DB is available.
+	if potDB != nil {
+		for _, e := range entries {
+			email := ""
+			username := e.Username
+			if strings.Contains(e.Username, "@") {
+				email = e.Username
+				username = strings.SplitN(e.Username, "@", 2)[0]
+			}
+			_ = potDB.SaveHashMetadata(e.Hash, username, email, fileFlag)
+		}
+	}
 
 	// Group by algorithm using the Rust analyzer for detection.
 	detect := func(hash string) (string, error) {
@@ -312,6 +342,15 @@ func runBatchCrack(
 	groups, err := batch.GroupByAlgorithm(entries, detect)
 	if err != nil {
 		return fmt.Errorf("group hashes: %w", err)
+	}
+
+	// Apply --only / --skip filters.
+	groups, warns := batch.FilterGroups(groups, onlyFlag, skipFlag)
+	for _, w := range warns {
+		fmt.Printf("  ⚠ --only: algorithm %q not found in file\n", w)
+	}
+	if len(groups) == 0 {
+		return fmt.Errorf("no algorithm groups match the given --only/--skip filters")
 	}
 
 	effectiveMode := resolveMode(modeFlag, wordlistFlag, maskFlag)
@@ -644,4 +683,192 @@ func configSetCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// ──────────────────────────────────────────────
+// insight subcommand
+// ──────────────────────────────────────────────
+
+func insightCmd() *cobra.Command {
+	var (
+		fileFlag   string
+		dbFlag     bool
+		moduleFlag string
+		reportFlag bool
+		formatFlag string
+		outputFlag string
+		fromFlag   string
+		toFlag     string
+		from2Flag  string
+		to2Flag    string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "insight",
+		Short: "Analyse cracked passwords and generate intelligence reports",
+		Long: `cracknet insight – password intelligence engine
+
+Analyse crack results stored in the pot file DB or a hash file directly.
+Modules: dna, reuse, policy, temporal, org, predict (comma-separated or 'all').
+
+Examples:
+  cracknet insight --db
+  cracknet insight --db --module dna,reuse
+  cracknet insight --db --report --format json -o report.json
+  cracknet insight --file hashes.txt`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !dbFlag && fileFlag == "" {
+				return fmt.Errorf("either --db or --file is required")
+			}
+
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			potDB, err := db.Open(cfg.PotFile)
+			if err != nil {
+				return fmt.Errorf("open pot DB: %w", err)
+			}
+			defer potDB.Close()
+
+			modules := parseModuleList(moduleFlag)
+			report := insight.FullReport{}
+
+			for _, mod := range modules {
+				switch mod {
+				case "dna":
+					fmt.Println("  Running DNA analysis...")
+					dnaReport, err := insight.RunDNA(potDB)
+					if err != nil {
+						fmt.Printf("  ⚠ dna: %v\n", err)
+					} else {
+						report.DNA = dnaReport
+					}
+
+				case "reuse":
+					fmt.Println("  Running reuse detection...")
+					reuseReport, err := insight.RunReuse(potDB)
+					if err != nil {
+						fmt.Printf("  ⚠ reuse: %v\n", err)
+					} else {
+						report.Reuse = reuseReport
+					}
+
+				case "temporal":
+					from1, to1, from2Parsed, to2Parsed, parseErr := parseTemporalFlags(fromFlag, toFlag, from2Flag, to2Flag)
+					if parseErr != nil {
+						fmt.Printf("  ⚠ temporal: %v\n", parseErr)
+						break
+					}
+					fmt.Println("  Running temporal analysis...")
+					tempReport, err := insight.RunTemporal(potDB, from1, to1, from2Parsed, to2Parsed)
+					if err != nil {
+						fmt.Printf("  ⚠ temporal: %v\n", err)
+					} else {
+						report.Temporal = tempReport
+					}
+
+				case "org":
+					fmt.Println("  Running org analysis...")
+					orgGroups, err := insight.RunOrg(potDB)
+					if err != nil {
+						fmt.Printf("  ⚠ org: %v\n", err)
+					} else {
+						report.Org = orgGroups
+					}
+				}
+			}
+
+			if !reportFlag {
+				// Print summary to stdout using text format.
+				out, err := insight.GenerateReport(report, "text")
+				if err != nil {
+					return fmt.Errorf("generate report: %w", err)
+				}
+				fmt.Print(out)
+				return nil
+			}
+
+			out, err := insight.GenerateReport(report, formatFlag)
+			if err != nil {
+				return fmt.Errorf("generate report: %w", err)
+			}
+
+			if outputFlag != "" {
+				if err := os.WriteFile(outputFlag, []byte(out), 0o644); err != nil {
+					return fmt.Errorf("write report: %w", err)
+				}
+				fmt.Printf("  Report written to %s\n", outputFlag)
+				return nil
+			}
+			fmt.Print(out)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&fileFlag, "file", "", "Hash file to analyse (imports metadata)")
+	cmd.Flags().BoolVar(&dbFlag, "db", false, "Analyse everything in the SQLite pot DB")
+	cmd.Flags().StringVar(&moduleFlag, "module", "all", "Modules to run: dna|reuse|temporal|org|all")
+	cmd.Flags().BoolVar(&reportFlag, "report", false, "Generate a full combined report")
+	cmd.Flags().StringVar(&formatFlag, "format", "text", "Report format: text|json|html")
+	cmd.Flags().StringVarP(&outputFlag, "output", "o", "", "Output file path (default stdout)")
+	cmd.Flags().StringVar(&fromFlag, "from", "", "Start date for temporal analysis (YYYY-MM-DD)")
+	cmd.Flags().StringVar(&toFlag, "to", "", "End date for temporal analysis (YYYY-MM-DD)")
+	cmd.Flags().StringVar(&from2Flag, "compare-from", "", "Start of comparison period for temporal")
+	cmd.Flags().StringVar(&to2Flag, "compare-to", "", "End of comparison period for temporal")
+	return cmd
+}
+
+// parseModuleList parses the --module flag value into a deduplicated list.
+func parseModuleList(s string) []string {
+	all := []string{"dna", "reuse", "temporal", "org"}
+	if s == "" || s == "all" {
+		return all
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(strings.ToLower(p))
+		if p == "all" {
+			return all
+		}
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// parseTemporalFlags parses the four date strings for temporal analysis.
+func parseTemporalFlags(from1Str, to1Str, from2Str, to2Str string) (time.Time, time.Time, time.Time, time.Time, error) {
+	const layout = "2006-01-02"
+	parse := func(s, def string) (time.Time, error) {
+		if s == "" {
+			s = def
+		}
+		return time.Parse(layout, s)
+	}
+	now := time.Now().UTC()
+	weekAgo := now.AddDate(0, 0, -7).Format(layout)
+	twoWeeksAgo := now.AddDate(0, 0, -14).Format(layout)
+
+	from1, err := parse(from1Str, twoWeeksAgo)
+	if err != nil {
+		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, fmt.Errorf("invalid --from: %w", err)
+	}
+	to1, err := parse(to1Str, weekAgo)
+	if err != nil {
+		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, fmt.Errorf("invalid --to: %w", err)
+	}
+	from2, err := parse(from2Str, weekAgo)
+	if err != nil {
+		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, fmt.Errorf("invalid --compare-from: %w", err)
+	}
+	to2, err := parse(to2Str, now.Format(layout))
+	if err != nil {
+		return time.Time{}, time.Time{}, time.Time{}, time.Time{}, fmt.Errorf("invalid --compare-to: %w", err)
+	}
+	return from1, to1, from2, to2, nil
 }
