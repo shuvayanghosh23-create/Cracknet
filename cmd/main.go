@@ -313,8 +313,6 @@ func runBatchCrack(
 
 	// Save metadata for each entry when a pot DB is available.
 	if potDB != nil {
-		importDate := time.Now().UTC()
-		_ = importDate // used implicitly via SaveHashMetadata
 		for _, e := range entries {
 			email := ""
 			username := e.Username
