@@ -72,4 +72,27 @@ mod tests {
         assert!(candidate_matches("sha512crypt", "test", hash));
         assert!(!candidate_matches("sha512crypt", "wrong", hash));
     }
+
+    #[test]
+    fn test_verify_crypt_requires_full_hash_string() {
+        let md5_full = "$1$5pZSV9va$azfrPr6af3Fc7dLblQXVa0";
+        let sha256_full = "$5$rounds=11858$WH1ABM5sKhxbkgCK$aTQsjPkz0rBsH3lQlJxw9HDTDXPKBxC0LlVeV69P.t1";
+        let sha512_full = "$6$rounds=11531$G/gkPn17kHYo0gTF$Kq.uZBHlSBXyzsOJXtxJruOOH4yc0Is13uY7yK0PvAvXxbvc1w8DO1RzREMhKsc82K/Jh8OquV8FZUlreYPJk1";
+
+        assert!(candidate_matches("md5crypt", "password", md5_full));
+        assert!(candidate_matches("sha256crypt", "test", sha256_full));
+        assert!(candidate_matches("sha512crypt", "test", sha512_full));
+
+        assert!(!candidate_matches("md5crypt", "password", "$1$5pZSV9va$"));
+        assert!(!candidate_matches(
+            "sha256crypt",
+            "test",
+            "$5$rounds=11858$WH1ABM5sKhxbkgCK$"
+        ));
+        assert!(!candidate_matches(
+            "sha512crypt",
+            "test",
+            "$6$rounds=11531$G/gkPn17kHYo0gTF$"
+        ));
+    }
 }

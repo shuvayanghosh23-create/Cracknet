@@ -89,16 +89,24 @@ $2b$12$WApznUOJfkEGSmYRfnkrPOr466oFDCaj4b6HY3EXGvfxm43seyhgK
 # Dictionary batch
 cracknet crack --file hashes.txt --wordlist rockyou.txt
 
+# Verbose batch (prints each cracked hash in real time)
+cracknet crack --file hashes.txt --wordlist rockyou.txt -v
+
 # Bruteforce batch
 cracknet crack --file hashes.txt --mask 'pass?d?d' --mode bruteforce
 
 # Hybrid batch
 cracknet crack --file hashes.txt --wordlist rockyou.txt --mask '?d?d' --mode hybrid
+
+# Write all batch rows (cracked + uncracked) to a table file
+cracknet crack --file hashes.txt --wordlist rockyou.txt --out example.txt
 ```
 
 Duplicate hashes are automatically deduplicated.
 Hashes are grouped by detected algorithm and cracked per group.
 Results are written to the pot file as they are found.
+By default, batch mode shows quiet in-place progress and does not print cracked hash lists.
+No output file is created unless `--out` is provided.
 
 Ambiguous 32-hex hashes (MD5 or NTLM) are treated as **MD5** by default.
 
