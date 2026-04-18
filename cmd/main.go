@@ -130,7 +130,7 @@ When using --file, you can filter which algorithm groups to process:
 
 Batch output:
   default       quiet in-place progress (no per-hash cracked output)
-  --verbose, -v print every cracked line (✓ hash => plaintext)
+  --verbose, -v print each cracked result as it's found (✓ hash => plaintext)
   --out FILE    write all batch entries to one human-readable table
   --force       attempt unsupported algorithm groups instead of skipping`,
 		Example: `  cracknet crack --hash 5f4dcc3b5aa765d61d8327deb882cf99 --wordlist rockyou.txt
@@ -234,7 +234,7 @@ Batch output:
 	cmd.Flags().StringVar(&algorithmFlag, "algorithm", "", "Hash algorithm override (auto-detect if omitted)")
 	cmd.Flags().StringVar(&onlyFlag, "only", "", "Comma-separated list of algorithms to crack (e.g. md5,sha1)")
 	cmd.Flags().StringVar(&skipFlag, "skip", "", "Comma-separated list of algorithms to skip (e.g. bcrypt,sha512crypt)")
-	cmd.Flags().BoolVarP(&verboseFlag, "verbose", "v", false, "Verbose batch output (print every cracked hash line)")
+	cmd.Flags().BoolVarP(&verboseFlag, "verbose", "v", false, "Verbose batch output (print each cracked result as it's found)")
 	cmd.Flags().StringVar(&outFlag, "out", "", "Write all batch entries (cracked + uncracked) to a human-readable output file")
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Attempt unsupported algorithm groups instead of skipping")
 	return cmd
@@ -639,12 +639,9 @@ func normalizeHashKey(hash string) string {
 
 func writeBatchOutputTable(path string, rows []batchOutputRow) error {
 	header := []string{"USERNAME", "ALGO", "HASH", "PLAINTEXT", "STATUS"}
-	widths := []int{
-		len(header[0]),
-		len(header[1]),
-		len(header[2]),
-		len(header[3]),
-		len(header[4]),
+	widths := make([]int, len(header))
+	for i, col := range header {
+		widths[i] = len(col)
 	}
 	for _, row := range rows {
 		if len(row.Username) > widths[0] {
