@@ -102,6 +102,9 @@ func crackCmd() *cobra.Command {
 		algorithmFlag string
 		onlyFlag      string
 		skipFlag      string
+		verboseFlag   bool
+		outFlag       string
+		forceFlag     bool
 	)
 
 	cmd := &cobra.Command{
@@ -123,7 +126,14 @@ Ambiguous 32-hex hashes (MD5 or NTLM) are treated as MD5 by default.
 When using --file, you can filter which algorithm groups to process:
   --only md5,sha1     only crack those groups (comma-separated)
   --skip bcrypt       skip those groups (comma-separated)
-(--only and --skip are mutually exclusive)`,
+(--only and --skip are mutually exclusive)
+
+Batch output:
+  default       quiet progress + rolling recent cracks (last 10)
+  --verbose     print every cracked line (✓ hash => plaintext)
+  --out FILE    write cracked results to one combined file
+                (default without --out: cracked_<algorithm>.txt per group)
+  --force       attempt unsupported algorithm groups instead of skipping`,
 		Example: `  cracknet crack --hash 5f4dcc3b5aa765d61d8327deb882cf99 --wordlist rockyou.txt
   cracknet crack --file hashes.txt --wordlist rockyou.txt
   cracknet crack --file hashes.txt --wordlist rockyou.txt --only md5,sha1
@@ -196,7 +206,21 @@ When using --file, you can filter which algorithm groups to process:
 			}
 
 			if fileFlag != "" {
-				return runBatchCrack(fileFlag, wordlistFlag, maskFlag, modeFlag, algorithmFlag, threadsFlag, onlyFlag, skipFlag, potDB, cfg)
+				return runBatchCrack(
+					fileFlag,
+					wordlistFlag,
+					maskFlag,
+					modeFlag,
+					algorithmFlag,
+					threadsFlag,
+					onlyFlag,
+					skipFlag,
+					verboseFlag,
+					outFlag,
+					forceFlag,
+					potDB,
+					cfg,
+				)
 			}
 			return runSingleCrack(hashFlag, wordlistFlag, maskFlag, modeFlag, algorithmFlag, threadsFlag, potDB)
 		},
@@ -211,6 +235,9 @@ When using --file, you can filter which algorithm groups to process:
 	cmd.Flags().StringVar(&algorithmFlag, "algorithm", "", "Hash algorithm override (auto-detect if omitted)")
 	cmd.Flags().StringVar(&onlyFlag, "only", "", "Comma-separated list of algorithms to crack (e.g. md5,sha1)")
 	cmd.Flags().StringVar(&skipFlag, "skip", "", "Comma-separated list of algorithms to skip (e.g. bcrypt,sha512crypt)")
+	cmd.Flags().BoolVar(&verboseFlag, "verbose", false, "Verbose batch output (print every cracked hash line)")
+	cmd.Flags().StringVar(&outFlag, "out", "", "Write cracked results to a combined output file path")
+	cmd.Flags().BoolVar(&forceFlag, "force", false, "Attempt unsupported algorithm groups instead of skipping")
 	return cmd
 }
 
@@ -298,6 +325,9 @@ func runBatchCrack(
 	fileFlag, wordlistFlag, maskFlag, modeFlag, algorithmFlag string,
 	threadsFlag int,
 	onlyFlag, skipFlag string,
+	verbose bool,
+	outFlag string,
+	force bool,
 	potDB *db.DB,
 	cfg config.Config,
 ) error {
@@ -356,6 +386,13 @@ func runBatchCrack(
 	effectiveMode := resolveMode(modeFlag, wordlistFlag, maskFlag)
 	fmt.Printf("  Attack mode: %s | Threads: %d\n", effectiveMode, threadsFlag)
 
+	if outFlag != "" {
+		if err := os.WriteFile(outFlag, []byte{}, 0o644); err != nil {
+			return fmt.Errorf("prepare output file %q: %w", outFlag, err)
+		}
+		fmt.Printf("  Output file: %s\n", outFlag)
+	}
+
 	crackedCount := 0
 	total := len(entries)
 
@@ -371,6 +408,14 @@ func runBatchCrack(
 	}
 
 	for _, algo := range algorithms {
+		if !isCrackSupportedAlgorithm(algo) && !force {
+			fmt.Printf("\n  [%s] detected but not supported for cracking; skipping (use --force to attempt)\n", algo)
+			continue
+		}
+		if !isCrackSupportedAlgorithm(algo) && force {
+			fmt.Printf("\n  [%s] unsupported algorithm group; attempting due to --force\n", algo)
+		}
+
 		group := groups[algo]
 		groupStart := time.Now()
 		groupCracked := 0
@@ -378,6 +423,7 @@ func runBatchCrack(
 		cachedProcessed := 0
 		toCrack := make([]string, 0, len(group))
 		crackedList := make([]string, 0, len(group))
+		outLines := make([]string, 0, len(group))
 
 		for _, entry := range group {
 			h := entry.Hash
@@ -386,11 +432,17 @@ func runBatchCrack(
 					cachedProcessed++
 					groupCracked++
 					crackedCount++
-					crackedList = append(crackedList, fmt.Sprintf("%s => %s (cache)", shortHash(h), cached.Plaintext))
+					outLines = append(outLines, formatCrackedLine(h, cached.Plaintext, algo))
+					crackedList = append(crackedList, fmt.Sprintf("%s => %s", shortHash(h), cached.Plaintext))
 					continue
 				}
 			}
 			toCrack = append(toCrack, h)
+		}
+
+		recent := make([]string, 0, recentCrackedLimit)
+		for _, entry := range crackedList {
+			recent = appendRecentWithLimit(recent, entry, recentCrackedLimit)
 		}
 
 		workers := threadsFlag
@@ -404,35 +456,56 @@ func runBatchCrack(
 			fmt.Printf("  Cached cracked: %d\n", cachedProcessed)
 		}
 
-		progressCb := func(msg bridge.Message) {
-			totalProcessed := cachedProcessed + msg.ProcessedHashes
-			totalCracked := groupCracked
-			if msg.CrackedHashes > 0 {
-				totalCracked = cachedProcessed + msg.CrackedHashes
-			}
-			remaining := len(group) - totalProcessed
+		lastProcessed := cachedProcessed
+		lastTried := uint64(0)
+		lastSpeed := 0.0
+		lastElapsed := uint64(0)
+		lastCurrent := ""
+		displayCracked := groupCracked
+		renderProgress := func() {
+			remaining := len(group) - lastProcessed
 			if remaining < 0 {
 				remaining = 0
 			}
-			current := ""
-			if msg.CurrentHash != nil && *msg.CurrentHash != "" {
-				current = shortHash(*msg.CurrentHash)
-			}
-			bar := progressBar(totalProcessed, len(group), 30)
-			elapsed := (time.Duration(msg.ElapsedMs) * time.Millisecond).Round(time.Second)
-			fmt.Printf("\r  %s %3d%% | processed %d/%d | cracked %d | remaining %d | tried %d | %.2f H/s | elapsed %s | current %s   ",
+			bar := progressBar(lastProcessed, len(group), 30)
+			elapsed := (time.Duration(lastElapsed) * time.Millisecond).Round(time.Second)
+			line := fmt.Sprintf("\r  %s %3d%% | processed %d/%d | cracked %d | remaining %d | tried %d | %s | elapsed %s",
 				bar,
-				percent(totalProcessed, len(group)),
-				totalProcessed,
+				percent(lastProcessed, len(group)),
+				lastProcessed,
 				len(group),
-				totalCracked,
+				displayCracked,
 				remaining,
-				msg.Tried,
-				msg.Speed,
+				lastTried,
+				formatSpeed(lastSpeed),
 				elapsed,
-				current,
 			)
+			if lastCurrent != "" {
+				line += fmt.Sprintf(" | current %s", lastCurrent)
+			}
+			if !verbose {
+				line += fmt.Sprintf(" | recent %d: %s", len(recent), formatRecent(recent))
+			}
+			fmt.Printf("%s   ", line)
 			groupLineActive = true
+		}
+		renderProgress()
+
+		progressCb := func(msg bridge.Message) {
+			lastProcessed = cachedProcessed + msg.ProcessedHashes
+			if msg.CrackedHashes > 0 {
+				displayCracked = maxInt(groupCracked, cachedProcessed+msg.CrackedHashes)
+			} else {
+				displayCracked = groupCracked
+			}
+			lastTried = msg.Tried
+			lastSpeed = msg.Speed
+			lastElapsed = msg.ElapsedMs
+			lastCurrent = ""
+			if msg.CurrentHash != nil && *msg.CurrentHash != "" {
+				lastCurrent = shortHash(*msg.CurrentHash)
+			}
+			renderProgress()
 		}
 
 		resultCb := func(msg bridge.Message) {
@@ -448,13 +521,20 @@ func runBatchCrack(
 			if potDB != nil && plain != "" {
 				_ = potDB.SaveHash(msg.Hash, plain, algo)
 			}
-			if groupLineActive {
-				fmt.Println()
-				groupLineActive = false
-			}
 			entry := fmt.Sprintf("%s => %s", shortHash(msg.Hash), plain)
+			outLines = append(outLines, formatCrackedLine(msg.Hash, plain, algo))
 			crackedList = append(crackedList, entry)
-			fmt.Printf("  ✓ %s\n", entry)
+			recent = appendRecentWithLimit(recent, entry, recentCrackedLimit)
+			displayCracked = groupCracked
+			if verbose {
+				if groupLineActive {
+					fmt.Println()
+					groupLineActive = false
+				}
+				fmt.Printf("  ✓ %s\n", entry)
+			} else {
+				renderProgress()
+			}
 		}
 
 		if len(toCrack) > 0 {
@@ -480,20 +560,35 @@ func runBatchCrack(
 		if groupLineActive {
 			fmt.Println()
 		}
+
+		groupOut := outFlag
+		if groupOut == "" {
+			groupOut = fmt.Sprintf("cracked_%s.txt", algo)
+		}
+		if len(outLines) > 0 {
+			if err := appendLines(groupOut, outLines); err != nil {
+				display.PrintError(fmt.Sprintf("[%s] write output file failed: %v", algo, err))
+			}
+		}
+
 		fmt.Printf("  [%s] summary: %d/%d cracked in %s\n",
 			algo,
 			groupCracked,
 			len(group),
 			time.Since(groupStart).Round(time.Millisecond),
 		)
+		if len(outLines) > 0 {
+			fmt.Printf("  [%s] wrote %d cracked result(s) to %s\n", algo, len(outLines), groupOut)
+		}
 		if len(crackedList) > 0 {
-			maxShow := len(crackedList)
-			if maxShow > 8 {
-				maxShow = 8
+			start := len(crackedList) - recentCrackedLimit
+			if start < 0 {
+				start = 0
 			}
-			fmt.Printf("  Cracked list (%d total, showing %d):\n", len(crackedList), maxShow)
-			for i := 0; i < maxShow; i++ {
-				fmt.Printf("    - %s\n", crackedList[i])
+			toShow := crackedList[start:]
+			fmt.Printf("  Cracked list (%d total, showing last %d):\n", len(crackedList), len(toShow))
+			for _, entry := range toShow {
+				fmt.Printf("    - %s\n", entry)
 			}
 		}
 	}
@@ -507,6 +602,86 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+const recentCrackedLimit = 10
+const (
+	gigaHashThreshold = 1_000_000_000
+	megaHashThreshold = 1_000_000
+	kiloHashThreshold = 1_000
+)
+
+var supportedCrackAlgorithms = map[string]bool{
+	"md5":         true,
+	"md5_or_ntlm": true,
+	"sha1":        true,
+	"sha256":      true,
+	"sha512":      true,
+	"ntlm":        true,
+	"bcrypt":      true,
+	"md5crypt":    true,
+	"sha256crypt": true,
+	"sha512crypt": true,
+}
+
+func isCrackSupportedAlgorithm(algo string) bool {
+	return supportedCrackAlgorithms[strings.ToLower(strings.TrimSpace(algo))]
+}
+
+func appendRecentWithLimit(items []string, entry string, max int) []string {
+	items = append(items, entry)
+	if len(items) <= max {
+		return items
+	}
+	return items[len(items)-max:]
+}
+
+func formatRecent(items []string) string {
+	if len(items) == 0 {
+		return "-"
+	}
+	return strings.Join(items, " ; ")
+}
+
+func formatSpeed(speed float64) string {
+	unit := "H/s"
+	switch {
+	case speed >= gigaHashThreshold:
+		speed /= gigaHashThreshold
+		unit = "GH/s"
+	case speed >= megaHashThreshold:
+		speed /= megaHashThreshold
+		unit = "MH/s"
+	case speed >= kiloHashThreshold:
+		speed /= kiloHashThreshold
+		unit = "KH/s"
+	}
+	return fmt.Sprintf("%.2f %s", speed, unit)
+}
+
+func formatCrackedLine(hash, plaintext, algo string) string {
+	return fmt.Sprintf("%s\t%s\t%s", algo, hash, plaintext)
+}
+
+func appendLines(path string, lines []string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for _, line := range lines {
+		if _, err := f.WriteString(line + "\n"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func shortHash(hash string) string {

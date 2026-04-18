@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use crate::algorithms::{bcrypt, md5, ntlm, sha};
+use crate::algorithms::matcher;
 use crate::attack::AttackJob;
 use crate::progress::Progress;
 
@@ -29,7 +29,6 @@ pub fn run_dictionary_attack(
         .map(|l| l.trim_end_matches('\r').to_string())
         .collect();
 
-    let normalized_target = job.hash.to_lowercase();
     let found = Arc::new(std::sync::Mutex::new(None::<String>));
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -44,12 +43,7 @@ pub fn run_dictionary_attack(
         .map_err(|e| format!("Thread pool error: {e}"))?;
 
     let algo = job.algorithm.to_lowercase();
-    let is_bcrypt = algo == "bcrypt";
-    let target = if is_bcrypt {
-        job.hash.clone()
-    } else {
-        normalized_target
-    };
+    let target = matcher::normalize_target_hash(&algo, &job.hash);
 
     pool.install(|| {
         words.par_iter().for_each(|word| {
@@ -57,19 +51,7 @@ pub fn run_dictionary_attack(
                 return;
             }
 
-            let matched = if is_bcrypt {
-                bcrypt::verify(word, &target)
-            } else {
-                let candidate = match algo.as_str() {
-                    "md5" => md5::hash(word),
-                    "sha1" => sha::sha1(word),
-                    "sha256" => sha::sha256(word),
-                    "sha512" => sha::sha512(word),
-                    "ntlm" => ntlm::hash(word),
-                    _ => md5::hash(word),
-                };
-                candidate == target
-            };
+            let matched = matcher::candidate_matches(&algo, word, &target);
 
             let _current = tried.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -177,5 +159,46 @@ mod tests {
         };
         let result = run_dictionary_attack(job, None).unwrap();
         assert_eq!(result, Some("password".to_string()));
+    }
+
+    #[test]
+    fn test_dictionary_md5crypt_found() {
+        let wl = make_wordlist(&["hello", "password", "world"]);
+        let job = AttackJob {
+            hash: "$1$5pZSV9va$azfrPr6af3Fc7dLblQXVa0".to_string(),
+            wordlist_path: wl.path().to_str().unwrap().to_string(),
+            algorithm: "md5crypt".to_string(),
+            threads: 1,
+        };
+        let result = run_dictionary_attack(job, None).unwrap();
+        assert_eq!(result, Some("password".to_string()));
+    }
+
+    #[test]
+    fn test_dictionary_sha256crypt_found() {
+        let wl = make_wordlist(&["hello", "test", "world"]);
+        let job = AttackJob {
+            hash: "$5$rounds=11858$WH1ABM5sKhxbkgCK$aTQsjPkz0rBsH3lQlJxw9HDTDXPKBxC0LlVeV69P.t1"
+                .to_string(),
+            wordlist_path: wl.path().to_str().unwrap().to_string(),
+            algorithm: "sha256crypt".to_string(),
+            threads: 1,
+        };
+        let result = run_dictionary_attack(job, None).unwrap();
+        assert_eq!(result, Some("test".to_string()));
+    }
+
+    #[test]
+    fn test_dictionary_sha512crypt_found() {
+        let wl = make_wordlist(&["hello", "test", "world"]);
+        let job = AttackJob {
+            hash: "$6$rounds=11531$G/gkPn17kHYo0gTF$Kq.uZBHlSBXyzsOJXtxJruOOH4yc0Is13uY7yK0PvAvXxbvc1w8DO1RzREMhKsc82K/Jh8OquV8FZUlreYPJk1"
+                .to_string(),
+            wordlist_path: wl.path().to_str().unwrap().to_string(),
+            algorithm: "sha512crypt".to_string(),
+            threads: 1,
+        };
+        let result = run_dictionary_attack(job, None).unwrap();
+        assert_eq!(result, Some("test".to_string()));
     }
 }
