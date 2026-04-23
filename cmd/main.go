@@ -129,10 +129,9 @@ When using --file, you can filter which algorithm groups to process:
 (--only and --skip are mutually exclusive)
 
 Batch output:
-  default       quiet progress + rolling recent cracks (last 10)
-  --verbose     print every cracked line (✓ hash => plaintext)
-  --out FILE    write cracked results to one combined file
-                (default without --out: cracked_<algorithm>.txt per group)
+  default       quiet in-place progress (no per-hash cracked output)
+  --verbose, -v print each cracked result as it's found (✓ hash => plaintext)
+  --out FILE    write all batch entries to one human-readable table
   --force       attempt unsupported algorithm groups instead of skipping`,
 		Example: `  cracknet crack --hash 5f4dcc3b5aa765d61d8327deb882cf99 --wordlist rockyou.txt
   cracknet crack --file hashes.txt --wordlist rockyou.txt
@@ -235,8 +234,8 @@ Batch output:
 	cmd.Flags().StringVar(&algorithmFlag, "algorithm", "", "Hash algorithm override (auto-detect if omitted)")
 	cmd.Flags().StringVar(&onlyFlag, "only", "", "Comma-separated list of algorithms to crack (e.g. md5,sha1)")
 	cmd.Flags().StringVar(&skipFlag, "skip", "", "Comma-separated list of algorithms to skip (e.g. bcrypt,sha512crypt)")
-	cmd.Flags().BoolVar(&verboseFlag, "verbose", false, "Verbose batch output (print every cracked hash line)")
-	cmd.Flags().StringVar(&outFlag, "out", "", "Write cracked results to a combined output file path")
+	cmd.Flags().BoolVarP(&verboseFlag, "verbose", "v", false, "Verbose batch output (print each cracked result as it's found)")
+	cmd.Flags().StringVar(&outFlag, "out", "", "Write all batch entries (cracked + uncracked) to a human-readable output file")
 	cmd.Flags().BoolVar(&forceFlag, "force", false, "Attempt unsupported algorithm groups instead of skipping")
 	return cmd
 }
@@ -386,21 +385,16 @@ func runBatchCrack(
 	effectiveMode := resolveMode(modeFlag, wordlistFlag, maskFlag)
 	fmt.Printf("  Attack mode: %s | Threads: %d\n", effectiveMode, threadsFlag)
 
-	if outFlag != "" {
-		if err := os.WriteFile(outFlag, []byte{}, 0o644); err != nil {
-			return fmt.Errorf("prepare output file %q: %w", outFlag, err)
-		}
-		fmt.Printf("  Output file: %s\n", outFlag)
-	}
-
 	crackedCount := 0
-	total := len(entries)
+	total := 0
 
 	algorithms := make([]string, 0, len(groups))
 	for algo := range groups {
 		algorithms = append(algorithms, algo)
+		total += len(groups[algo])
 	}
 	sort.Strings(algorithms)
+	outRows := make([]batchOutputRow, 0, total)
 
 	wordlistSize := -1
 	if wordlistFlag != "" && (effectiveMode == "dictionary" || effectiveMode == "hybrid") {
@@ -408,22 +402,29 @@ func runBatchCrack(
 	}
 
 	for _, algo := range algorithms {
+		group := groups[algo]
 		if !isCrackSupportedAlgorithm(algo) && !force {
 			fmt.Printf("\n  [%s] detected but not supported for cracking; skipping (use --force to attempt)\n", algo)
+			for _, entry := range group {
+				outRows = append(outRows, batchOutputRow{
+					Username: entry.Username,
+					Algo:     algo,
+					Hash:     entry.Hash,
+					Status:   "UNCRACKED",
+				})
+			}
 			continue
 		}
 		if !isCrackSupportedAlgorithm(algo) && force {
 			fmt.Printf("\n  [%s] unsupported algorithm group; attempting due to --force\n", algo)
 		}
 
-		group := groups[algo]
 		groupStart := time.Now()
 		groupCracked := 0
 		groupLineActive := false
 		cachedProcessed := 0
 		toCrack := make([]string, 0, len(group))
-		crackedList := make([]string, 0, len(group))
-		outLines := make([]string, 0, len(group))
+		crackedByHash := make(map[string]string, len(group))
 
 		for _, entry := range group {
 			h := entry.Hash
@@ -432,17 +433,11 @@ func runBatchCrack(
 					cachedProcessed++
 					groupCracked++
 					crackedCount++
-					outLines = append(outLines, formatCrackedLine(h, cached.Plaintext, algo))
-					crackedList = append(crackedList, fmt.Sprintf("%s => %s", shortHash(h), cached.Plaintext))
+					crackedByHash[normalizeHashKey(h)] = cached.Plaintext
 					continue
 				}
 			}
 			toCrack = append(toCrack, h)
-		}
-
-		recent := make([]string, 0, recentCrackedLimit)
-		for _, entry := range crackedList {
-			recent = appendRecentWithLimit(recent, entry, recentCrackedLimit)
 		}
 
 		workers := threadsFlag
@@ -460,8 +455,9 @@ func runBatchCrack(
 		lastTried := uint64(0)
 		lastSpeed := 0.0
 		lastElapsed := uint64(0)
-		lastCurrent := ""
 		displayCracked := groupCracked
+		lastRendered := ""
+		lastRenderedLen := 0
 		renderProgress := func() {
 			remaining := len(group) - lastProcessed
 			if remaining < 0 {
@@ -480,14 +476,17 @@ func runBatchCrack(
 				formatSpeed(lastSpeed),
 				elapsed,
 			)
-			if lastCurrent != "" {
-				line += fmt.Sprintf(" | current %s", lastCurrent)
+			if line == lastRendered {
+				return
 			}
-			if !verbose {
-				line += fmt.Sprintf(" | recent %d: %s", len(recent), formatRecent(recent))
+			padding := ""
+			if lastRenderedLen > len(line) {
+				padding = strings.Repeat(" ", lastRenderedLen-len(line))
 			}
-			fmt.Printf("%s   ", line)
+			fmt.Printf("%s%s", line, padding)
 			groupLineActive = true
+			lastRendered = line
+			lastRenderedLen = len(line)
 		}
 		renderProgress()
 
@@ -501,10 +500,6 @@ func runBatchCrack(
 			lastTried = msg.Tried
 			lastSpeed = msg.Speed
 			lastElapsed = msg.ElapsedMs
-			lastCurrent = ""
-			if msg.CurrentHash != nil && *msg.CurrentHash != "" {
-				lastCurrent = shortHash(*msg.CurrentHash)
-			}
 			renderProgress()
 		}
 
@@ -522,9 +517,7 @@ func runBatchCrack(
 				_ = potDB.SaveHash(msg.Hash, plain, algo)
 			}
 			entry := fmt.Sprintf("%s => %s", shortHash(msg.Hash), plain)
-			outLines = append(outLines, formatCrackedLine(msg.Hash, plain, algo))
-			crackedList = append(crackedList, entry)
-			recent = appendRecentWithLimit(recent, entry, recentCrackedLimit)
+			crackedByHash[normalizeHashKey(msg.Hash)] = plain
 			displayCracked = groupCracked
 			if verbose {
 				if groupLineActive {
@@ -532,9 +525,8 @@ func runBatchCrack(
 					groupLineActive = false
 				}
 				fmt.Printf("  ✓ %s\n", entry)
-			} else {
-				renderProgress()
 			}
+			renderProgress()
 		}
 
 		if len(toCrack) > 0 {
@@ -561,36 +553,35 @@ func runBatchCrack(
 			fmt.Println()
 		}
 
-		groupOut := outFlag
-		if groupOut == "" {
-			groupOut = fmt.Sprintf("cracked_%s.txt", algo)
-		}
-		if len(outLines) > 0 {
-			if err := appendLines(groupOut, outLines); err != nil {
-				display.PrintError(fmt.Sprintf("[%s] write output file failed: %v", algo, err))
+		for _, entry := range group {
+			plaintext, cracked := crackedByHash[normalizeHashKey(entry.Hash)]
+			status := "UNCRACKED"
+			if cracked {
+				status = "CRACKED"
+			} else {
+				plaintext = ""
 			}
+			outRows = append(outRows, batchOutputRow{
+				Username:  entry.Username,
+				Algo:      algo,
+				Hash:      entry.Hash,
+				Plaintext: plaintext,
+				Status:    status,
+			})
 		}
-
 		fmt.Printf("  [%s] summary: %d/%d cracked in %s\n",
 			algo,
 			groupCracked,
 			len(group),
 			time.Since(groupStart).Round(time.Millisecond),
 		)
-		if len(outLines) > 0 {
-			fmt.Printf("  [%s] wrote %d cracked result(s) to %s\n", algo, len(outLines), groupOut)
+	}
+
+	if outFlag != "" {
+		if err := writeBatchOutputTable(outFlag, outRows); err != nil {
+			return fmt.Errorf("write output file %q: %w", outFlag, err)
 		}
-		if len(crackedList) > 0 {
-			start := len(crackedList) - recentCrackedLimit
-			if start < 0 {
-				start = 0
-			}
-			toShow := crackedList[start:]
-			fmt.Printf("  Cracked list (%d total, showing last %d):\n", len(crackedList), len(toShow))
-			for _, entry := range toShow {
-				fmt.Printf("    - %s\n", entry)
-			}
-		}
+		fmt.Printf("  Wrote %d result row(s) to %s\n", len(outRows), outFlag)
 	}
 
 	fmt.Printf("\n  Batch complete: %d/%d cracked.\n", crackedCount, total)
@@ -611,7 +602,6 @@ func maxInt(a, b int) int {
 	return b
 }
 
-const recentCrackedLimit = 10
 const (
 	gigaHashThreshold = 1_000_000_000
 	megaHashThreshold = 1_000_000
@@ -635,19 +625,81 @@ func isCrackSupportedAlgorithm(algo string) bool {
 	return supportedCrackAlgorithms[strings.ToLower(strings.TrimSpace(algo))]
 }
 
-func appendRecentWithLimit(items []string, entry string, max int) []string {
-	items = append(items, entry)
-	if len(items) <= max {
-		return items
-	}
-	return items[len(items)-max:]
+type batchOutputRow struct {
+	Username  string
+	Algo      string
+	Hash      string
+	Plaintext string
+	Status    string
 }
 
-func formatRecent(items []string) string {
-	if len(items) == 0 {
-		return "-"
+func normalizeHashKey(hash string) string {
+	return strings.ToLower(strings.TrimSpace(hash))
+}
+
+func writeBatchOutputTable(path string, rows []batchOutputRow) error {
+	header := []string{"USERNAME", "ALGO", "HASH", "PLAINTEXT", "STATUS"}
+	widths := make([]int, len(header))
+	for i, col := range header {
+		widths[i] = len(col)
 	}
-	return strings.Join(items, " ; ")
+	for _, row := range rows {
+		if len(row.Username) > widths[0] {
+			widths[0] = len(row.Username)
+		}
+		if len(row.Algo) > widths[1] {
+			widths[1] = len(row.Algo)
+		}
+		if len(row.Hash) > widths[2] {
+			widths[2] = len(row.Hash)
+		}
+		if len(row.Plaintext) > widths[3] {
+			widths[3] = len(row.Plaintext)
+		}
+		if len(row.Status) > widths[4] {
+			widths[4] = len(row.Status)
+		}
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	writeLine := func(cols ...string) error {
+		_, err := fmt.Fprintf(
+			f,
+			"%-*s | %-*s | %-*s | %-*s | %-*s\n",
+			widths[0], cols[0],
+			widths[1], cols[1],
+			widths[2], cols[2],
+			widths[3], cols[3],
+			widths[4], cols[4],
+		)
+		return err
+	}
+
+	if err := writeLine(header...); err != nil {
+		return err
+	}
+	sep := fmt.Sprintf(
+		"%s-+-%s-+-%s-+-%s-+-%s\n",
+		strings.Repeat("-", widths[0]),
+		strings.Repeat("-", widths[1]),
+		strings.Repeat("-", widths[2]),
+		strings.Repeat("-", widths[3]),
+		strings.Repeat("-", widths[4]),
+	)
+	if _, err := f.WriteString(sep); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if err := writeLine(row.Username, row.Algo, row.Hash, row.Plaintext, row.Status); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func formatSpeed(speed float64) string {
@@ -664,24 +716,6 @@ func formatSpeed(speed float64) string {
 		unit = "KH/s"
 	}
 	return fmt.Sprintf("%.2f %s", speed, unit)
-}
-
-func formatCrackedLine(hash, plaintext, algo string) string {
-	return fmt.Sprintf("%s\t%s\t%s", algo, hash, plaintext)
-}
-
-func appendLines(path string, lines []string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	for _, line := range lines {
-		if _, err := f.WriteString(line + "\n"); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func shortHash(hash string) string {
