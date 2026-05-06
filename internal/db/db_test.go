@@ -90,7 +90,7 @@ func TestSaveInsightReport(t *testing.T) {
 	}
 	defer d.Close()
 
-	id, err := d.SaveInsightReport(`{"test":true}`, 42)
+	id, err := d.SaveInsightReport(`{"test":true}`, "text report", "dna,reuse", 42)
 	if err != nil {
 		t.Fatalf("SaveInsightReport: %v", err)
 	}

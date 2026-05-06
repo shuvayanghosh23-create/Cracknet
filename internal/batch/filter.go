@@ -5,22 +5,33 @@ import "strings"
 
 // FilterGroups returns a filtered copy of groups applying --only or --skip.
 // only and skip are comma-separated algo names (empty = no filter).
-// Returns the filtered map and a slice of algo names from --only that were not found.
-func FilterGroups(groups map[string][]HashEntry, only, skip string) (map[string][]HashEntry, []string) {
-	warnings := []string{}
+// Returns kept groups, skipped groups, and a slice of algo names from --only that were not found.
+func FilterGroups(groups map[string][]HashEntry, only, skip string) (kept map[string][]HashEntry, skipped map[string][]HashEntry, warnings []string) {
+	warnings = []string{}
+	skipped = make(map[string][]HashEntry)
 	if only == "" && skip == "" {
-		return groups, warnings
+		return groups, skipped, warnings
 	}
-	result := make(map[string][]HashEntry)
+	kept = make(map[string][]HashEntry)
 	if only != "" {
+		onlySet := make(map[string]bool)
 		for _, name := range SplitAlgoList(only) {
-			if g, ok := groups[name]; ok {
-				result[name] = g
+			onlySet[name] = true
+		}
+		for name, g := range groups {
+			if onlySet[name] {
+				kept[name] = g
 			} else {
+				skipped[name] = g
+			}
+		}
+		// Warn about --only names that weren't present in the file.
+		for _, name := range SplitAlgoList(only) {
+			if _, ok := groups[name]; !ok {
 				warnings = append(warnings, name)
 			}
 		}
-		return result, warnings
+		return kept, skipped, warnings
 	}
 	// skip mode
 	skipSet := make(map[string]bool)
@@ -28,11 +39,13 @@ func FilterGroups(groups map[string][]HashEntry, only, skip string) (map[string]
 		skipSet[name] = true
 	}
 	for name, g := range groups {
-		if !skipSet[name] {
-			result[name] = g
+		if skipSet[name] {
+			skipped[name] = g
+		} else {
+			kept[name] = g
 		}
 	}
-	return result, warnings
+	return kept, skipped, warnings
 }
 
 // SplitAlgoList splits a comma-separated algo list into lowercase trimmed names.

@@ -16,9 +16,12 @@ func makeGroups() map[string][]HashEntry {
 
 func TestFilterGroups_NoFilter(t *testing.T) {
 	groups := makeGroups()
-	got, warns := FilterGroups(groups, "", "")
+	got, skipped, warns := FilterGroups(groups, "", "")
 	if len(warns) != 0 {
 		t.Errorf("expected no warnings, got %v", warns)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("expected no skipped groups, got %v", skipped)
 	}
 	if len(got) != len(groups) {
 		t.Errorf("expected %d groups, got %d", len(groups), len(got))
@@ -27,7 +30,7 @@ func TestFilterGroups_NoFilter(t *testing.T) {
 
 func TestFilterGroups_Only(t *testing.T) {
 	groups := makeGroups()
-	got, warns := FilterGroups(groups, "md5,sha1", "")
+	got, skipped, warns := FilterGroups(groups, "md5,sha1", "")
 	if len(warns) != 0 {
 		t.Errorf("expected no warnings, got %v", warns)
 	}
@@ -43,11 +46,14 @@ func TestFilterGroups_Only(t *testing.T) {
 	if _, ok := got["bcrypt"]; ok {
 		t.Error("bcrypt should be excluded")
 	}
+	if _, ok := skipped["bcrypt"]; !ok {
+		t.Error("bcrypt should be in skipped map")
+	}
 }
 
 func TestFilterGroups_Skip(t *testing.T) {
 	groups := makeGroups()
-	got, warns := FilterGroups(groups, "", "bcrypt")
+	got, skipped, warns := FilterGroups(groups, "", "bcrypt")
 	if len(warns) != 0 {
 		t.Errorf("expected no warnings, got %v", warns)
 	}
@@ -57,11 +63,14 @@ func TestFilterGroups_Skip(t *testing.T) {
 	if _, ok := got["bcrypt"]; ok {
 		t.Error("bcrypt should be skipped")
 	}
+	if _, ok := skipped["bcrypt"]; !ok {
+		t.Error("bcrypt should be in skipped map")
+	}
 }
 
 func TestFilterGroups_OnlyMissing(t *testing.T) {
 	groups := makeGroups()
-	got, warns := FilterGroups(groups, "md5,sha512", "")
+	got, _, warns := FilterGroups(groups, "md5,sha512", "")
 	if len(warns) != 1 || warns[0] != "sha512" {
 		t.Errorf("expected warning for sha512, got %v", warns)
 	}
@@ -75,12 +84,15 @@ func TestFilterGroups_OnlyMissing(t *testing.T) {
 
 func TestFilterGroups_SkipAll(t *testing.T) {
 	groups := makeGroups()
-	got, warns := FilterGroups(groups, "", "md5,sha1,bcrypt")
+	got, skipped, warns := FilterGroups(groups, "", "md5,sha1,bcrypt")
 	if len(warns) != 0 {
 		t.Errorf("expected no warnings, got %v", warns)
 	}
 	if len(got) != 0 {
 		t.Errorf("expected 0 groups, got %d", len(got))
+	}
+	if len(skipped) != 3 {
+		t.Errorf("expected 3 skipped groups, got %d", len(skipped))
 	}
 }
 

@@ -181,6 +181,51 @@ fn main() {
                     }
                 }
             }
+            "batch_crack" => {
+                // New parallel batch engine command with job_id and worker-level events.
+                let job_id = value
+                    .get("job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("job-0")
+                    .to_string();
+                let hashes: Vec<String> = value
+                    .get("hashes")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                let algorithm = value
+                    .get("algorithm")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("md5")
+                    .to_string();
+                let mode_str = value
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("dictionary")
+                    .to_string();
+                let wordlist = value
+                    .get("wordlist")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let mask = value
+                    .get("mask")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let threads = value
+                    .get("threads")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(4) as usize;
+
+                let mode = cracknet_core::attack::batch_scheduler::BatchAttackMode::from_str(&mode_str);
+                cracknet_core::attack::batch_scheduler::run_batch(
+                    hashes,
+                    &algorithm,
+                    mode,
+                    wordlist.as_deref(),
+                    mask.as_deref(),
+                    threads,
+                    &job_id,
+                );
+            }
             "crack_batch" => {
                 let job: BatchJob = match serde_json::from_value(value.clone()) {
                     Ok(j) => j,

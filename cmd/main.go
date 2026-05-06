@@ -374,9 +374,25 @@ func runBatchCrack(
 	}
 
 	// Apply --only / --skip filters.
-	groups, warns := batch.FilterGroups(groups, onlyFlag, skipFlag)
+	groups, skippedGroups, warns := batch.FilterGroups(groups, onlyFlag, skipFlag)
 	for _, w := range warns {
 		fmt.Printf("  ⚠ --only: algorithm %q not found in file\n", w)
+	}
+	// Print one line per discarded group.
+	if len(skippedGroups) > 0 {
+		skippedAlgos := make([]string, 0, len(skippedGroups))
+		for algo := range skippedGroups {
+			skippedAlgos = append(skippedAlgos, algo)
+		}
+		sort.Strings(skippedAlgos)
+		for _, algo := range skippedAlgos {
+			n := len(skippedGroups[algo])
+			if onlyFlag != "" {
+				fmt.Printf("  [skipped]  %-14s %6d hashes   (use --only %s to include)\n", algo, n, algo)
+			} else {
+				fmt.Printf("  [skipped]  %-14s %6d hashes   (use --only %s to include)\n", algo, n, algo)
+			}
+		}
 	}
 	if len(groups) == 0 {
 		return fmt.Errorf("no algorithm groups match the given --only/--skip filters")
@@ -919,7 +935,6 @@ func insightCmd() *cobra.Command {
 
 Analyse crack results stored in the pot file DB or a hash file directly.
 Modules: dna, reuse, policy, temporal, org, predict (comma-separated or 'all').
-
 Examples:
   cracknet insight --db
   cracknet insight --db --module dna,reuse
@@ -986,6 +1001,24 @@ Examples:
 					} else {
 						report.Org = orgGroups
 					}
+
+				case "policy":
+					fmt.Println("  Running policy analysis...")
+					policyReport, err := insight.RunPolicy(potDB)
+					if err != nil {
+						fmt.Printf("  ⚠ policy: %v\n", err)
+					} else {
+						report.Policy = policyReport
+					}
+
+				case "predict":
+					fmt.Println("  Running predict analysis...")
+					predictReport, err := insight.RunPredict(potDB)
+					if err != nil {
+						fmt.Printf("  ⚠ predict: %v\n", err)
+					} else {
+						report.Predictor = predictReport
+					}
 				}
 			}
 
@@ -996,6 +1029,7 @@ Examples:
 					return fmt.Errorf("generate report: %w", err)
 				}
 				fmt.Print(out)
+				insight.SaveReport(potDB, report, modules)
 				return nil
 			}
 
@@ -1003,6 +1037,7 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("generate report: %w", err)
 			}
+			insight.SaveReport(potDB, report, modules)
 
 			if outputFlag != "" {
 				if err := os.WriteFile(outputFlag, []byte(out), 0o644); err != nil {
@@ -1018,7 +1053,7 @@ Examples:
 
 	cmd.Flags().StringVar(&fileFlag, "file", "", "Hash file to analyse (imports metadata)")
 	cmd.Flags().BoolVar(&dbFlag, "db", false, "Analyse everything in the SQLite pot DB")
-	cmd.Flags().StringVar(&moduleFlag, "module", "all", "Modules to run: dna|reuse|temporal|org|all")
+	cmd.Flags().StringVar(&moduleFlag, "module", "all", "Modules to run: dna|reuse|temporal|org|policy|predict|all")
 	cmd.Flags().BoolVar(&reportFlag, "report", false, "Generate a full combined report")
 	cmd.Flags().StringVar(&formatFlag, "format", "text", "Report format: text|json|html")
 	cmd.Flags().StringVarP(&outputFlag, "output", "o", "", "Output file path (default stdout)")
@@ -1031,7 +1066,7 @@ Examples:
 
 // parseModuleList parses the --module flag value into a deduplicated list.
 func parseModuleList(s string) []string {
-	all := []string{"dna", "reuse", "temporal", "org"}
+	all := []string{"dna", "reuse", "temporal", "org", "policy", "predict"}
 	if s == "" || s == "all" {
 		return all
 	}

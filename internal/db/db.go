@@ -96,6 +96,18 @@ func migrate(conn *sql.DB) error {
 			return err
 		}
 	}
+	// Additive migrations — add missing columns to existing tables.
+	// Errors are silently ignored because the column may already exist.
+	additiveMigrations := []string{
+		`ALTER TABLE password_patterns ADD COLUMN prefix TEXT DEFAULT ''`,
+		`ALTER TABLE password_patterns ADD COLUMN has_lower BOOLEAN NOT NULL DEFAULT 0`,
+		`ALTER TABLE password_reuse ADD COLUMN detected_at DATETIME DEFAULT (datetime('now'))`,
+		`ALTER TABLE insight_reports ADD COLUMN modules_run TEXT DEFAULT ''`,
+		`ALTER TABLE insight_reports ADD COLUMN report_text TEXT DEFAULT ''`,
+	}
+	for _, stmt := range additiveMigrations {
+		conn.Exec(stmt) // ignore "duplicate column" errors
+	}
 	return nil
 }
 
@@ -144,9 +156,11 @@ type PasswordPattern struct {
 	Plaintext   string
 	PatternType string
 	BaseWord    string
+	Prefix      string
 	Suffix      string
 	Length      int
 	HasUpper    bool
+	HasLower    bool
 	HasDigit    bool
 	HasSpecial  bool
 	EntropyBits float64
@@ -202,10 +216,10 @@ func (d *DB) GetAllCrackedWithPlaintext() ([]CrackedHash, error) {
 func (d *DB) SavePasswordPattern(p PasswordPattern) error {
 	_, err := d.conn.Exec(
 		`INSERT OR REPLACE INTO password_patterns
-		 (plaintext, pattern_type, base_word, suffix, length, has_upper, has_digit, has_special, entropy_bits, analysed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.Plaintext, p.PatternType, p.BaseWord, p.Suffix, p.Length,
-		p.HasUpper, p.HasDigit, p.HasSpecial, p.EntropyBits,
+		 (plaintext, pattern_type, base_word, prefix, suffix, length, has_upper, has_lower, has_digit, has_special, entropy_bits, analysed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Plaintext, p.PatternType, p.BaseWord, p.Prefix, p.Suffix, p.Length,
+		p.HasUpper, p.HasLower, p.HasDigit, p.HasSpecial, p.EntropyBits,
 		p.AnalysedAt.UTC().Format(time.RFC3339),
 	)
 	return err
@@ -214,8 +228,8 @@ func (d *DB) SavePasswordPattern(p PasswordPattern) error {
 // GetPasswordPatterns returns all analyzed password patterns.
 func (d *DB) GetPasswordPatterns() ([]PasswordPattern, error) {
 	rows, err := d.conn.Query(
-		`SELECT plaintext, pattern_type, base_word, suffix, length,
-		        has_upper, has_digit, has_special, entropy_bits, analysed_at
+		`SELECT plaintext, pattern_type, COALESCE(base_word,''), COALESCE(prefix,''), COALESCE(suffix,''), length,
+		        has_upper, COALESCE(has_lower,0), has_digit, has_special, entropy_bits, analysed_at
 		 FROM password_patterns ORDER BY analysed_at DESC`,
 	)
 	if err != nil {
@@ -227,8 +241,8 @@ func (d *DB) GetPasswordPatterns() ([]PasswordPattern, error) {
 	for rows.Next() {
 		var p PasswordPattern
 		var analysedAt string
-		if err := rows.Scan(&p.Plaintext, &p.PatternType, &p.BaseWord, &p.Suffix, &p.Length,
-			&p.HasUpper, &p.HasDigit, &p.HasSpecial, &p.EntropyBits, &analysedAt); err != nil {
+		if err := rows.Scan(&p.Plaintext, &p.PatternType, &p.BaseWord, &p.Prefix, &p.Suffix, &p.Length,
+			&p.HasUpper, &p.HasLower, &p.HasDigit, &p.HasSpecial, &p.EntropyBits, &analysedAt); err != nil {
 			return nil, err
 		}
 		p.AnalysedAt, _ = time.Parse(time.RFC3339, analysedAt)
@@ -267,10 +281,10 @@ func (d *DB) DetectReuse() ([]ReuseEntry, error) {
 }
 
 // SaveInsightReport stores a generated report and returns its ID.
-func (d *DB) SaveInsightReport(reportJSON string, score int) (int64, error) {
+func (d *DB) SaveInsightReport(reportJSON, reportText, modulesRun string, score int) (int64, error) {
 	res, err := d.conn.Exec(
-		`INSERT INTO insight_reports (report_json, score, generated_at) VALUES (?, ?, ?)`,
-		reportJSON, score, time.Now().UTC().Format(time.RFC3339),
+		`INSERT INTO insight_reports (report_json, report_text, modules_run, score, generated_at) VALUES (?, ?, ?, ?, ?)`,
+		reportJSON, reportText, modulesRun, score, time.Now().UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return 0, err
@@ -297,6 +311,63 @@ func (d *DB) GetAllHashes() ([]CrackedHash, error) {
 		}
 		entry.CrackedAt, _ = time.Parse(time.RFC3339, crackedAt)
 		results = append(results, entry)
+	}
+	return results, rows.Err()
+}
+
+// GetAllMetadata returns all hash_metadata entries.
+func (d *DB) GetAllMetadata() ([]HashMetadata, error) {
+	rows, err := d.conn.Query(
+		`SELECT hash, COALESCE(username,''), COALESCE(email,''), COALESCE(department,''), COALESCE(source_file,''), COALESCE(import_date,'')
+		 FROM hash_metadata`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []HashMetadata
+	for rows.Next() {
+		var m HashMetadata
+		var importDate string
+		if err := rows.Scan(&m.Hash, &m.Username, &m.Email, &m.Department, &m.SourceFile, &importDate); err != nil {
+			return nil, err
+		}
+		m.ImportDate, _ = time.Parse(time.RFC3339, importDate)
+		results = append(results, m)
+	}
+	return results, rows.Err()
+}
+
+// SaveReuseEntry persists a password reuse pair to the database.
+func (d *DB) SaveReuseEntry(e ReuseEntry) error {
+	_, err := d.conn.Exec(
+		`INSERT OR IGNORE INTO password_reuse (plaintext, hash1, hash2, username1, username2, similarity, detected_at)
+		 VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+		e.Plaintext, e.Hash1, e.Hash2, e.Username1, e.Username2, e.Similarity,
+	)
+	return err
+}
+
+// GetUncracked returns hashes in hash_metadata that are NOT in cracked_hashes.
+func (d *DB) GetUncracked() ([]HashMetadata, error) {
+	rows, err := d.conn.Query(
+		`SELECT m.hash, COALESCE(m.username,''), COALESCE(m.email,''), COALESCE(m.department,''), COALESCE(m.source_file,''), COALESCE(m.import_date,'')
+		 FROM hash_metadata m
+		 WHERE m.hash NOT IN (SELECT hash FROM cracked_hashes)`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []HashMetadata
+	for rows.Next() {
+		var m HashMetadata
+		var importDate string
+		if err := rows.Scan(&m.Hash, &m.Username, &m.Email, &m.Department, &m.SourceFile, &importDate); err != nil {
+			return nil, err
+		}
+		m.ImportDate, _ = time.Parse(time.RFC3339, importDate)
+		results = append(results, m)
 	}
 	return results, rows.Err()
 }
